@@ -395,13 +395,21 @@ const GFS_PARAMS: Record<string, { param: string; combinaison: string; niveau: s
   // portent le suffixe HPA (confirme grib_modele.sh: case "...-850HPA-...").
   HU850:    { param: "R",    combinaison: "P", niveau: "850HPA", label: "Humidité relative 850 hPa (%)" },
   HU700:    { param: "R",    combinaison: "P", niveau: "700HPA", label: "Humidité relative 700 hPa (%)" },
-  // Precipitations = code "PLUIE" (param.cfg: "Somme des precipitations liquides"),
-  // pas "RR3H"/"RR". La duree de cumul (3H/6H) est un argument separe du script.
-  RR3H:     { param: "PLUIE", combinaison: "P", niveau: "SOL", duree: "3H", label: "Précipitations 3h (mm)" },
-  RR6H:     { param: "PLUIE", combinaison: "P", niveau: "SOL", duree: "6H", label: "Précipitations 6h (mm)" },
-  // CAPE = code "CAPE_I" (param.cfg: "Energie potentielle instantanee convective"),
-  // pas "CAPE"/"CP" qui ne sont pas des codenames Synergie valides.
-  CAPE:     { param: "CAPE_I", combinaison: "P", niveau: "SOL", label: "CAPE (J/kg)" },
+  // Precipitations = code "PRECIP" — confirme par inspection directe du catalogue
+  // GRIB persistant (/data-space/data/grib/US2.GFSAFR025/<date>/PRECIP.SOL.*H).
+  // "PLUIE" existe bien dans param.cfg mais n'a AUCUN fichier extrait pour ce
+  // domaine — un codename valide en theorie n'implique pas que la donnee existe
+  // reellement dans le flux recu. La duree de cumul (3H/6H) est un argument
+  // separe du script (grib_modele.sh calcule la difference entre echeances).
+  RR3H:     { param: "PRECIP", combinaison: "P", niveau: "SOL", duree: "3H", label: "Précipitations 3h (mm)" },
+  RR6H:     { param: "PRECIP", combinaison: "P", niveau: "SOL", duree: "6H", label: "Précipitations 6h (mm)" },
+  // CAPE retire : "CAPE_I" existe dans param.cfg et est un codename valide, mais
+  // sur ce domaine (GFSAFR025) les seuls fichiers CAPE_I.* extraits sont des
+  // couches de profondeur de sol (CAPE_I.M0_10cm, M10_40cm, M40_100cm,
+  // M100_200cm — de l'humidite du sol par couche, pas de l'energie convective).
+  // Confirme par inspection directe du catalogue GRIB : aucun CAPE_I.SOL.* et
+  // aucun autre codename cape/energie/convectif n'existe pour ce domaine.
+  // Le CAPE n'est simplement pas dans le flux recu sur cette station.
 };
 
 // ─── Utilitaire : SFTP download d'un fichier arbitraire ──────────────────────
@@ -509,6 +517,18 @@ async function renderGribToLocalFile(
     `export LOGNAME=synergie`,
     `for prof in /home/synergie/client4.7.0/etc/profile /home/synergie/client/etc/profile /home/synergie/.bash_profile /home/synergie/.profile; do [ -f "$prof" ] && . "$prof" 2>/dev/null && break; done`,
     `export PATH=$PATH:/home/synergie/client4.7.0/bin.i686:/home/synergie/client4.7.0/bin:/home/synergie/client/bin`,
+    // CRITIQUE : sans ca, extr_grib.sh (appele par grib_modele.sh) interroge un
+    // webservice SOAP DISTANT (synws2 --methode=modele_getManyGribs vers
+    // SYNERGIE_SERVER, un autre serveur que SYABAN02) qui est visiblement
+    // instable/incomplet depuis notre automatisation — c'est la vraie cause
+    // des rendus vides, pas une histoire de fenetre temporelle. SYNERGIE_DEMO=ON
+    // bascule extr_grib.sh sur une lecture directe des fichiers locaux, la
+    // meme lecture que fait l'IHM Synergie normale. GRIB_HOME pointe vers
+    // l'archive GRIB reelle et persistante (confirme : fichiers PARAM.NIVEAU.ECHEANCE
+    // pour le run du jour) — PAS vers $HOME/data_demo (donnees d'entrainement
+    // figees) que pointe le profil "rejoue" standard.
+    `export SYNERGIE_DEMO=ON`,
+    `export GRIB_HOME=/data-space/data/grib`,
     // Trouver le fichier -auth d'Xorg depuis /proc
     `XORG_PID=$(ps aux 2>/dev/null | grep -v grep | grep -E '[X]org|[X]11' | awk '{print $2}' | head -1)`,
     `XORG_AUTH=""`,
@@ -631,11 +651,14 @@ async function handleRenderGrib(
   }
 }
 
-// GET /api/synergie/render-grib?key=PMER&reseau=00H&echeance=06H  (testable depuis le navigateur)
+// GET /api/synergie/render-grib?key=PMER&reseau=12H&echeance=6H  (testable depuis le navigateur)
+// Note echeance : le catalogue GRIB reel n'a jamais "0H" (echeance minimale "3H")
+// et n'utilise pas de zero devant ("6H", "12H" — pas "06H"). Un format different
+// ne matche aucun fichier reel.
 router.get("/synergie/render-grib", async (req, res) => {
   const key     = String(req.query["key"]      ?? "PMER");
-  const reseau  = String(req.query["reseau"]   ?? "00H");
-  const echeance = String(req.query["echeance"] ?? "06H");
+  const reseau  = String(req.query["reseau"]   ?? computeSynergieReseau());
+  const echeance = String(req.query["echeance"] ?? "6H");
   const dateArg = req.query["date"] ? String(req.query["date"]) : undefined;
   await handleRenderGrib(key, reseau, echeance, dateArg, req.log, res);
 });
@@ -645,7 +668,7 @@ router.get("/synergie/render-grib", async (req, res) => {
 // qu'un utilisateur ouvre le briefing. Ca augmente les chances de tomber dans
 // la fenetre ou les donnees GFS sont reellement extraites sur SYABAN02, et
 // alimente le cache long terme (7h) consulte par la route HTTP ci-dessus.
-const WARM_ECHEANCE = "00H";
+const WARM_ECHEANCE = "6H";
 let warmTimer: ReturnType<typeof setInterval> | null = null;
 
 async function warmSynergieCache(log: RenderLogger): Promise<void> {

@@ -499,6 +499,8 @@ async function buildMisvaLowLevSection(): Promise<BriefingSection> {
 // automatiquement, d'ou une section "toujours vide" en pratique. On construit
 // desormais les cartes via /api/synergie/render-grib (rendu GFS a la demande,
 // cache cote serveur 20 min — voir GRIB_CACHE_TTL dans routes/synergie.ts).
+// CAPE retire : le catalogue GRIB reel de ce domaine n'a pas de champ CAPE
+// exploitable (voir le commentaire sur CAPE_I dans routes/synergie.ts).
 const SYNERGIE_LIVE_PARAMS: { key: string; label: string }[] = [
   { key: "PMER",  label: "Pression réduite mer" },
   { key: "T2M",   label: "Température 2m" },
@@ -506,13 +508,13 @@ const SYNERGIE_LIVE_PARAMS: { key: string; label: string }[] = [
   { key: "HU850", label: "Humidité relative 850 hPa" },
   { key: "HU700", label: "Humidité relative 700 hPa" },
   { key: "RR6H",  label: "Précipitations 6h" },
-  { key: "CAPE",  label: "CAPE" },
 ];
 // Une seule echeance pour l'instant : chaque carte pilote un vrai rendu GUI sur
 // l'unique display X11 partage de SYABAN02 (rendus serialises, voir
 // withGribLock dans routes/synergie.ts) — 7 params x 4 echeances aurait pris
-// bien trop longtemps a charger sur un cache froid.
-const SYNERGIE_ECHEANCES = ["00H"];
+// bien trop longtemps a charger sur un cache froid. "6H" (pas "06H") : le
+// catalogue GRIB reel n'a jamais "0H" et n'utilise pas de zero devant.
+const SYNERGIE_ECHEANCES = ["6H"];
 
 function synergieGribUrl(key: string, reseau: string, echeance: string): string {
   return `/api/synergie/render-grib?key=${encodeURIComponent(key)}&reseau=${encodeURIComponent(reseau)}&echeance=${encodeURIComponent(echeance)}`;
