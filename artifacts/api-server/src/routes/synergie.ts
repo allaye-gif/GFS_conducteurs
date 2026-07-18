@@ -8,6 +8,8 @@ import {
   getCachedFile, localCachePath, resolveArchivePath,
   openSFTP, runSSHCommand, readRemoteFile, computeSynergieReseau,
 } from "../lib/synergie-sftp.js";
+import { extractGribGrid, type GribGrid } from "../lib/grib-extract.js";
+import { renderGribSvg, SCALES, type ColorStop } from "../lib/grib-render.js";
 
 const MIME: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
@@ -19,43 +21,21 @@ const WEBSERV_PORT = () => parseInt(process.env.SYABAN02_WEBSERV_PORT ?? "8080")
 const router = Router();
 
 // ─── Cache disque pour render-grib ───────────────────────────────────────────
-// Chaque rendu pilote une vraie session X11 + GUI sur SYABAN02 (10-60s, un
-// seul display partagé). Les données GFS extraites sur SYABAN02 (tmp_modele)
-// se comportent comme un tampon transitoire : une carte qui rend correctement
-// à un instant T peut redevenir vide 30 min plus tard si la fenêtre de
-// disponibilité est passée. Le cache est donc volontairement long (~7h, plus
-// d'un cycle GFS) et n'est écrasé QUE par un rendu qui contient vraiment des
-// données (voir MIN_VALID_GRIB_SIZE) — un rendu vide/échoué ne remplace jamais
-// un dernier bon rendu en cache. Un job d'arrière-plan (voir
-// startSynergieWarmScheduler) tente de le rafraîchir toutes les 20 min pour
-// maximiser les chances de capturer la fenêtre utile de chaque cycle.
+// On extrait les donnees brutes (extr_grib_modele.sh + grib_get_data, voir
+// lib/grib-extract.ts) et on dessine la carte nous-memes (lib/grib-render.ts)
+// plutot que de piloter visu_modele/X11 par capture d'ecran — ce dernier
+// n'affichait pas les donnees malgre une extraction confirmee correcte (voir
+// l'historique dans le commit precedent). Cache long (~7h, plus d'un cycle
+// GFS) : une extraction reussie reste valable jusqu'au prochain cycle.
 const GRIB_CACHE_DIR = path.join(os.tmpdir(), "synergie-grib-cache");
 const GRIB_CACHE_TTL = 7 * 60 * 60 * 1000;
-// En dessous de ce seuil, la carte est très probablement un fond de carte vide
-// (pas de données) plutôt qu'un vrai rendu — observé empiriquement : les rendus
-// vides font ~19-20 Ko, les rendus avec données réelles 44-112 Ko.
-const MIN_VALID_GRIB_SIZE = 25_000;
 try { fs.mkdirSync(GRIB_CACHE_DIR, { recursive: true }); } catch { /* ignore */ }
 
 function gribCacheKey(key: string, synDate: string, echeance: string, duree: string): string {
-  return path.join(GRIB_CACHE_DIR, `${key}_${synDate}_${echeance}_${duree}.png`.replace(/[^a-zA-Z0-9._-]/g, "_"));
+  return path.join(GRIB_CACHE_DIR, `${key}_${synDate}_${echeance}_${duree}.svg`.replace(/[^a-zA-Z0-9._-]/g, "_"));
 }
 function gribCacheValid(f: string): boolean {
   try { return (Date.now() - fs.statSync(f).mtimeMs) < GRIB_CACHE_TTL; } catch { return false; }
-}
-
-// ─── Verrou de rendu ──────────────────────────────────────────────────────────
-// SYABAN02 n'a qu'un seul display X11 partage — deux rendus en parallele se
-// marchent dessus (le nettoyage pre-lancement de l'un tue le rendu en cours de
-// l'autre), produisant des captures vides/corrompues ou le bureau entier. Le
-// briefing charge plusieurs cartes en parallele (une <img> par graphique), donc
-// on serialise ici : un seul rendu X11 a la fois sur SYABAN02, les autres
-// attendent leur tour au lieu de se percuter.
-let gribRenderChain: Promise<unknown> = Promise.resolve();
-function withGribLock<T>(fn: () => Promise<T>): Promise<T> {
-  const result = gribRenderChain.then(fn, fn);
-  gribRenderChain = result.then(() => undefined, () => undefined);
-  return result;
 }
 
 // GET /api/synergie/archive — liste + synchro cache en arrière-plan
@@ -383,33 +363,37 @@ router.get("/synergie/probe-report", async (req, res) => {
 // valides : H, PV, MER, AERO, TH, P, IMMERSION, ISP — confirme dans le case
 // $COORDV de grib_modele.sh). "duree" = argument Duree de cumul (ex: pluie sur
 // 6H) ; laisser vide pour les champs instantanes (pas de cumul).
-const GFS_PARAMS: Record<string, { param: string; combinaison: string; niveau: string; duree?: string; label: string }> = {
-  PMER:     { param: "PMER", combinaison: "P", niveau: "SOL", label: "Pression réduite mer (hPa)" },
+type ScalarParamDef = {
+  kind: "scalar";
+  param: string; combinaison: string; niveau: string; duree?: string;
+  scale: keyof typeof SCALES; label: string;
+};
+type WindParamDef = {
+  kind: "wind";
+  combinaison: string; niveau: string;
+  scale: "wind"; label: string;
+};
+type ParamDef = ScalarParamDef | WindParamDef;
+
+const GFS_PARAMS: Record<string, ParamDef> = {
+  PMER:  { kind: "scalar", param: "PMER",   combinaison: "P", niveau: "SOL",    scale: "pmer",     label: "Pression réduite mer (hPa)" },
   // Niveaux 2m/10m = coordonnee verticale "H" (Hauteur), pas "P" (Pression).
-  // "T2M"/"FF10" ne sont pas des codes Combinaison Synergie valides — ce sont
-  // "T" et "FF" (confirme dans grib_modele.sh: H_superposition traite T|R|VV et FLUX|FF).
-  T2M:      { param: "T",    combinaison: "H", niveau: "2M",  label: "Température 2m (°C)" },
-  FF10:     { param: "FF",   combinaison: "H", niveau: "10M", label: "Vent 10m (m/s)" },
-  // Humidite relative = code "R" (param.cfg: "R;R;...;Humidite relative = HU"),
-  // niveau pression = coordonnee "P" (comme PMER), pas "HR". Niveaux de pression
-  // portent le suffixe HPA (confirme grib_modele.sh: case "...-850HPA-...").
-  HU850:    { param: "R",    combinaison: "P", niveau: "850HPA", label: "Humidité relative 850 hPa (%)" },
-  HU700:    { param: "R",    combinaison: "P", niveau: "700HPA", label: "Humidité relative 700 hPa (%)" },
-  // Precipitations = code "PRECIP" — confirme par inspection directe du catalogue
-  // GRIB persistant (/data-space/data/grib/US2.GFSAFR025/<date>/PRECIP.SOL.*H).
-  // "PLUIE" existe bien dans param.cfg mais n'a AUCUN fichier extrait pour ce
-  // domaine — un codename valide en theorie n'implique pas que la donnee existe
-  // reellement dans le flux recu. La duree de cumul (3H/6H) est un argument
-  // separe du script (grib_modele.sh calcule la difference entre echeances).
-  RR3H:     { param: "PRECIP", combinaison: "P", niveau: "SOL", duree: "3H", label: "Précipitations 3h (mm)" },
-  RR6H:     { param: "PRECIP", combinaison: "P", niveau: "SOL", duree: "6H", label: "Précipitations 6h (mm)" },
-  // CAPE retire : "CAPE_I" existe dans param.cfg et est un codename valide, mais
-  // sur ce domaine (GFSAFR025) les seuls fichiers CAPE_I.* extraits sont des
-  // couches de profondeur de sol (CAPE_I.M0_10cm, M10_40cm, M40_100cm,
-  // M100_200cm — de l'humidite du sol par couche, pas de l'energie convective).
-  // Confirme par inspection directe du catalogue GRIB : aucun CAPE_I.SOL.* et
-  // aucun autre codename cape/energie/convectif n'existe pour ce domaine.
-  // Le CAPE n'est simplement pas dans le flux recu sur cette station.
+  T2M:   { kind: "scalar", param: "T",      combinaison: "H", niveau: "2M",     scale: "temp",     label: "Température 2m (°C)" },
+  // Vent = magnitude calculee depuis U+V (pas de champ FF stocke tel quel).
+  FF10:  { kind: "wind",                    combinaison: "H", niveau: "10M",    scale: "wind",     label: "Vent 10m (m/s)" },
+  // Humidite relative = code "R", niveau pression = coordonnee "P" (comme PMER).
+  // Niveaux de pression portent le suffixe HPA.
+  HU850: { kind: "scalar", param: "R",      combinaison: "P", niveau: "850HPA", scale: "humidity", label: "Humidité relative 850 hPa (%)" },
+  HU700: { kind: "scalar", param: "R",      combinaison: "P", niveau: "700HPA", scale: "humidity", label: "Humidité relative 700 hPa (%)" },
+  // Precipitations = code "PRECIP" (confirme par inspection directe du catalogue
+  // GRIB persistant) — "PLUIE" est un codename valide dans param.cfg mais n'a
+  // aucun fichier extrait pour ce domaine.
+  RR3H:  { kind: "scalar", param: "PRECIP", combinaison: "P", niveau: "SOL", duree: "3H", scale: "precip", label: "Précipitations 3h (mm)" },
+  RR6H:  { kind: "scalar", param: "PRECIP", combinaison: "P", niveau: "SOL", duree: "6H", scale: "precip", label: "Précipitations 6h (mm)" },
+  // CAPE retire : "CAPE_I" sur ce domaine correspond a de l'humidite du sol par
+  // couche de profondeur (M0_10cm, M10_40cm...), pas a de l'energie convective —
+  // confirme par inspection directe du catalogue GRIB. Le CAPE n'est simplement
+  // pas dans le flux recu sur cette station.
 };
 
 // ─── Utilitaire : SFTP download d'un fichier arbitraire ──────────────────────
@@ -482,9 +466,14 @@ router.get("/synergie/x11-windows", async (req, res) => {
 type RenderLogger = { info: (o: object, m: string) => void; warn: (o: object, m: string) => void };
 
 // ─── Rendu GRIB pur (reutilise par la route HTTP et par le warmer d'arriere-plan) ──
+// Extrait les donnees brutes (extr_grib_modele.sh + grib_get_data, en forcant
+// SYNERGIE_DEMO=ON pour lire les fichiers locaux plutot que le webservice
+// distant instable) puis dessine la carte nous-memes — on ne pilote plus
+// visu_modele/X11 du tout, qui n'affichait pas les donnees malgre une
+// extraction confirmee correcte.
 async function renderGribToLocalFile(
   key: string, reseau: string, echeance: string, dateArg: string | undefined, log: RenderLogger
-): Promise<{ localPath: string; cfg: (typeof GFS_PARAMS)[string]; fromCache: boolean; size: number }> {
+): Promise<{ localPath: string; cfg: ParamDef; fromCache: boolean; size: number }> {
   const cfg = GFS_PARAMS[key];
   if (!cfg) {
     throw new Error(`Paramètre inconnu: ${key}. Valides: ${Object.keys(GFS_PARAMS).join(", ")}`);
@@ -495,137 +484,44 @@ async function renderGribToLocalFile(
   const rHH = reseau.replace("H", "").padStart(2, "0");
   const defDate = `${now.getUTCFullYear()}${String(now.getUTCMonth()+1).padStart(2,"0")}${String(now.getUTCDate()).padStart(2,"0")}${rHH}0000`;
   const synDate = dateArg ?? defDate;
-  const duree = cfg.duree ?? echeance;
+  const duree = cfg.kind === "scalar" ? (cfg.duree ?? echeance) : echeance;
 
   const cached = gribCacheKey(key, synDate, echeance, duree);
   if (gribCacheValid(cached)) {
     return { localPath: cached, cfg, fromCache: true, size: fs.statSync(cached).size };
   }
 
-  return withGribLock(async () => {
-    // Un autre appel a peut-etre deja rempli le cache pendant qu'on attendait le verrou
-    if (gribCacheValid(cached)) {
-      return { localPath: cached, cfg, fromCache: true, size: fs.statSync(cached).size };
-    }
+  log.info({ key, synDate, reseau, echeance }, "render-grib: extraction");
 
-    const ts = Date.now();
-  const remotePng = `/tmp/synergie_grib_${key}_${ts}.png`;
+  let grid: GribGrid;
+  let scaleKey: keyof typeof SCALES;
 
-  // Script bash multi-lignes — XAUTHORITY auto-discovery pour SSH sans cookie X11
-  const script = [
-    `export HOME=/home/synergie`,
-    `export LOGNAME=synergie`,
-    `for prof in /home/synergie/client4.7.0/etc/profile /home/synergie/client/etc/profile /home/synergie/.bash_profile /home/synergie/.profile; do [ -f "$prof" ] && . "$prof" 2>/dev/null && break; done`,
-    `export PATH=$PATH:/home/synergie/client4.7.0/bin.i686:/home/synergie/client4.7.0/bin:/home/synergie/client/bin`,
-    // CRITIQUE : sans ca, extr_grib.sh (appele par grib_modele.sh) interroge un
-    // webservice SOAP DISTANT (synws2 --methode=modele_getManyGribs vers
-    // SYNERGIE_SERVER, un autre serveur que SYABAN02) qui est visiblement
-    // instable/incomplet depuis notre automatisation — c'est la vraie cause
-    // des rendus vides, pas une histoire de fenetre temporelle. SYNERGIE_DEMO=ON
-    // bascule extr_grib.sh sur une lecture directe des fichiers locaux, la
-    // meme lecture que fait l'IHM Synergie normale. GRIB_HOME pointe vers
-    // l'archive GRIB reelle et persistante (confirme : fichiers PARAM.NIVEAU.ECHEANCE
-    // pour le run du jour) — PAS vers $HOME/data_demo (donnees d'entrainement
-    // figees) que pointe le profil "rejoue" standard.
-    `export SYNERGIE_DEMO=ON`,
-    `export GRIB_HOME=/data-space/data/grib`,
-    // Trouver le fichier -auth d'Xorg depuis /proc
-    `XORG_PID=$(ps aux 2>/dev/null | grep -v grep | grep -E '[X]org|[X]11' | awk '{print $2}' | head -1)`,
-    `XORG_AUTH=""`,
-    `if [ -n "$XORG_PID" ] && [ -f /proc/$XORG_PID/cmdline ]; then`,
-    `  XORG_AUTH=$(tr '\\0' '\\n' < /proc/$XORG_PID/cmdline | grep -A1 '^-auth$' | grep -v '^-auth$' | head -1)`,
-    `fi`,
-    `[ -n "$XORG_AUTH" ] && export XAUTHORITY=$XORG_AUTH`,
-    `[ -z "$XORG_AUTH" ] && [ -f /home/synergie/.Xauthority ] && export XAUTHORITY=/home/synergie/.Xauthority`,
-    // Extraire le numéro de display réel depuis xauth list
-    `REAL_DISPLAY=$(XAUTHORITY=$XAUTHORITY /usr/bin/xauth list 2>/dev/null | awk '{print $1}' | grep -oE ':[0-9]+' | head -1)`,
-    `[ -z "$REAL_DISPLAY" ] && REAL_DISPLAY=:5`,
-    `DISPNUM=$(echo "$REAL_DISPLAY" | tr -d ':')`,
-    // Le cookie est stocké sous "HOSTNAME/unix:N" mais DISPLAY=:N cherche ":N" → pas de match
-    // Fix : ajouter une entrée sans hostname avec le même cookie (":N MIT-MAGIC-COOKIE-1 <hash>")
-    `COOKIE=$(XAUTHORITY=$XAUTHORITY /usr/bin/xauth list 2>/dev/null | grep "unix:$DISPNUM" | awk '{print $3}' | head -1)`,
-    `[ -z "$COOKIE" ] && COOKIE=$(XAUTHORITY=$XAUTHORITY /usr/bin/xauth list 2>/dev/null | grep ":$DISPNUM" | awk '{print $3}' | head -1)`,
-    `if [ -n "$COOKIE" ]; then`,
-    `  /usr/bin/xauth -f $XAUTHORITY add :$DISPNUM MIT-MAGIC-COOKIE-1 $COOKIE 2>/dev/null`,
-    `  echo "XAUTH_ADDED=:$DISPNUM cookie=$COOKIE"`,
-    `fi`,
-    `export DISPLAY=:$DISPNUM`,
-    `echo "DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY"`,
-    `MY_PID=$$`,
-    // Nettoyage : tuer tout visu_modele/grib_modele.sh laissé par un rendu precedent.
-    // Sans ca, la capture ci-dessous peut recuperer une fenetre perimee (rendu passe
-    // jamais ferme) au lieu du rendu qu'on vient de demander — c'est la cause du bug
-    // "donnees anciennes" : le process precedent ne se termine jamais tout seul.
-    // On exclut explicitement notre propre PID ($MY_PID) : pkill -f matcherait aussi
-    // CE script lui-meme (son texte contient litteralement "grib_modele.sh"/"visu_modele"
-    // dans les commandes which/grep ci-dessous), ce qui le tuerait en plein milieu.
-    `ps aux 2>/dev/null | grep -iE 'grib_modele\\.sh|visu_modele' | grep -v grep | awk -v me="$MY_PID" '$2 != me {print $2}' | xargs -r kill -9 2>/dev/null`,
-    `sleep 1`,
-    // Lancer grib_modele.sh (ouvre visu_modele sur :0)
-    `GRIB_SCRIPT=$(which grib_modele.sh 2>/dev/null || find /home/synergie -name 'grib_modele.sh' 2>/dev/null | head -1)`,
-    `[ -z "$GRIB_SCRIPT" ] && echo "__ERROR__ grib_modele.sh introuvable" && exit 1`,
-    `echo "SCRIPT=$GRIB_SCRIPT"`,
-    // grib_modele.sh lit positionnellement : Modele Domaine_grib Combinaison
-    // CoordonneeVerticale Niveau Reseau(=DATE complete) Echeance Duree Domaine.
-    // Echeance (pos.7, $ECH) est passe a extr_grib_modele.sh pour choisir la
-    // bonne heure de prevision — l'inverser avec Duree affiche la mauvaise echeance.
-    `"$GRIB_SCRIPT" US2 GFSAFR025 ${cfg.param} ${cfg.combinaison} ${cfg.niveau} ${synDate} ${echeance} ${duree} West_Africa 2>&1 &`,
-    // Certains parametres (ex: T2M, FF10) passent par eclate_grib_modele pour
-    // decompresser le grib avant que visu_modele n'ouvre sa fenetre — ca peut
-    // prendre bien plus que quelques secondes. On sonde directement la vraie
-    // fenetre (pas juste la presence du process) jusqu'a 60s, plutot qu'un
-    // delai fixe trop court qui retombe sur une capture root inutilisable.
-    `WAITED=0`,
-    `WIN_ID=""`,
-    `while [ $WAITED -lt 60 ]; do`,
-    `  WIN_ID=$(/usr/bin/xwininfo -root -tree 2>/dev/null | grep -i 'visu_modele' | grep -v '1x1+0+0' | awk '{print $1}' | head -1)`,
-    `  [ -n "$WIN_ID" ] && echo "window_found waited=$WAITED id=$WIN_ID" && break`,
-    `  sleep 1`,
-    `  WAITED=$(expr $WAITED + 1)`,
-    `done`,
-    `sleep 2`,
-    // Re-verifie apres le settle (la fenetre a pu changer/se redessiner)
-    `WIN_ID=$(/usr/bin/xwininfo -root -tree 2>/dev/null | grep -i 'visu_modele' | grep -v '1x1+0+0' | awk '{print $1}' | head -1)`,
-    `if [ -n "$WIN_ID" ]; then`,
-    `  echo "WINDOW=$WIN_ID"`,
-    `  /usr/bin/import -window "$WIN_ID" "${remotePng}" 2>&1`,
-    `else`,
-    `  echo "WINDOW=root"`,
-    `  /usr/bin/import -window root "${remotePng}" 2>&1`,
-    `fi`,
-    `echo "__RENDER_OK__"`,
-    // Nettoyage post-capture : ne pas laisser trainer ce rendu pour l'appel suivant
-    `ps aux 2>/dev/null | grep -iE 'grib_modele\\.sh|visu_modele' | grep -v grep | awk -v me="$MY_PID" '$2 != me {print $2}' | xargs -r kill -9 2>/dev/null`,
-  ].join("\n");
+  if (cfg.kind === "wind") {
+    const [uGrid, vGrid] = await Promise.all([
+      extractGribGrid("U", cfg.niveau, echeance, synDate, cfg.combinaison),
+      extractGribGrid("V", cfg.niveau, echeance, synDate, cfg.combinaison),
+    ]);
+    const values = uGrid.values.map((u, i) => Math.sqrt(u * u + (vGrid.values[i] ?? 0) ** 2));
+    grid = { ...uGrid, values };
+    scaleKey = "wind";
+  } else {
+    grid = await extractGribGrid(cfg.param, cfg.niveau, echeance, synDate, cfg.combinaison);
+    scaleKey = cfg.scale;
+  }
 
-    log.info({ key, synDate, reseau, echeance }, "render-grib: démarrage");
-    const { stdout, stderr } = await runSSHCommand(script.trim().replace(/\n/g, "\n"));
-
-    if (stdout.includes("__ERROR__")) {
-      throw new Error(`Environnement Synergie: ${stdout}${stderr}`);
-    }
-    if (!stdout.includes("__RENDER_OK__")) {
-      throw new Error(`Rendu échoué: ${stdout}${stderr}`);
-    }
-
-    // Vérifier taille PNG
-    const { stdout: sz } = await runSSHCommand(`stat -c %s "${remotePng}" 2>/dev/null || echo 0`);
-    const size = parseInt(sz.trim()) || 0;
-    if (size < 2000) {
-      throw new Error(`PNG trop petit ou absent (${size} octets)`);
-    }
-
-    const localPath = await downloadRemoteFile(remotePng);
-    runSSHCommand(`rm -f "${remotePng}"`).catch(() => {});
-
-    if (size >= MIN_VALID_GRIB_SIZE) {
-      fs.copyFile(localPath, cached, () => {});
-    } else {
-      log.warn({ key, reseau, echeance, size }, "render-grib: carte probablement vide (pas de données) — pas mise en cache long terme");
-    }
-
-    return { localPath, cfg, fromCache: false, size };
+  const scale = SCALES[scaleKey];
+  const svg = renderGribSvg(grid, {
+    title: cfg.label,
+    subtitle: `GFSAFR025 (SYABAN02) — réseau ${reseau} — échéance +${echeance}`,
+    unit: scale.unit,
+    min: scale.min,
+    max: scale.max,
+    stops: scale.stops as unknown as ColorStop[],
+    transform: scale.transform,
   });
+
+  fs.writeFileSync(cached, svg, "utf8");
+  return { localPath: cached, cfg, fromCache: false, size: Buffer.byteLength(svg) };
 }
 
 // ─── Helper commun render-grib (GET + POST) ──────────────────────────────────
@@ -635,15 +531,17 @@ async function handleRenderGrib(
   res: import("express").Response
 ) {
   try {
+    // localPath est toujours le fichier de cache lui-meme (le rendu ecrit
+    // directement dedans) — rien a nettoyer apres coup, contrairement a
+    // l'ancienne approche qui telechargeait un fichier temporaire distinct.
     const { localPath, cfg, fromCache } = await renderGribToLocalFile(key, reseau, echeance, dateArg, log);
-    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Content-Type", "image/svg+xml");
     res.setHeader("Cache-Control", "public, max-age=300");
     res.setHeader("X-Grib-Key", key);
     res.setHeader("X-Grib-Label", cfg.label);
     res.setHeader("X-Cache", fromCache ? "HIT" : "MISS");
     const stream = fs.createReadStream(localPath);
     stream.pipe(res);
-    if (!fromCache) stream.on("end", () => fs.unlink(localPath, () => {}));
     stream.on("error", (e) => { if (!res.headersSent) res.status(500).json({ error: String(e) }); });
   } catch (err) {
     log.warn({ err }, "render-grib: error");
