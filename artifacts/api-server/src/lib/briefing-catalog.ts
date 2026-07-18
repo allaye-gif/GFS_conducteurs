@@ -492,58 +492,45 @@ async function buildMisvaLowLevSection(): Promise<BriefingSection> {
   };
 }
 
-// ─── Section Synergie ────────────────────────────────────────────────────────
-async function buildSynergieSection(): Promise<BriefingSection> {
-  try {
-    const { listSynergieArchive } = await import("./synergie-sftp.js");
-    const files = await listSynergieArchive();
-    if (files.length === 0) {
-      return {
-        id: "synergie",
-        name: "Champs Synergie — SYABAN02",
-        contentType: "upload",
-        subsections: [{ label: "ARCHIVE Synergie (vide)", charts: [] }],
-      };
-    }
+// ─── Section Synergie — rendu live GFSAFR025 via SYABAN02 ────────────────────
+// L'ancienne version listait l'ARCHIVE SFTP statique (/home/synergie/ARCHIVE),
+// qui ne contient que des captures manuelles de 2016-2023 — jamais rafraichie
+// automatiquement, d'ou une section "toujours vide" en pratique. On construit
+// desormais les cartes via /api/synergie/render-grib (rendu GFS a la demande,
+// cache cote serveur 20 min — voir GRIB_CACHE_TTL dans routes/synergie.ts).
+const SYNERGIE_LIVE_PARAMS: { key: string; label: string }[] = [
+  { key: "PMER",  label: "Pression réduite mer" },
+  { key: "T2M",   label: "Température 2m" },
+  { key: "FF10",  label: "Vent 10m" },
+  { key: "HU850", label: "Humidité relative 850 hPa" },
+  { key: "HU700", label: "Humidité relative 700 hPa" },
+  { key: "RR6H",  label: "Précipitations 6h" },
+  { key: "CAPE",  label: "CAPE" },
+];
+const SYNERGIE_ECHEANCES = ["00H", "06H", "12H", "18H"];
 
-    // Grouper par sous-dossier (chaque sous-dossier = un type de champ Synergie)
-    const groups = new Map<string, typeof files>();
-    for (const f of files) {
-      const key = f.subdir || "";
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)!.push(f);
-    }
+function synergieGribUrl(key: string, reseau: string, echeance: string): string {
+  return `/api/synergie/render-grib?key=${encodeURIComponent(key)}&reseau=${encodeURIComponent(reseau)}&echeance=${encodeURIComponent(echeance)}`;
+}
 
-    const subsections = Array.from(groups.entries()).map(([subdir, groupFiles]) => ({
-      label: subdir
-        ? `${subdir} — ${groupFiles.length} fichier(s)`
-        : `ARCHIVE (racine) — ${groupFiles.length} fichier(s)`,
-      charts: groupFiles.map((f) => ({
-        id: `synergie-${f.relPath}`,
-        label: f.name.replace(/\.[^.]+$/, "").replace(/[_-]/g, " "),
-        url: f.url,
-        description: f.relPath,
-      })),
-    }));
+function buildSynergieSection(cycle: string): BriefingSection {
+  const reseau = `${cycle}H`;
+  const subsections = SYNERGIE_LIVE_PARAMS.map(({ key, label }) => ({
+    label: `${label} — GFSAFR025 réseau ${reseau}`,
+    charts: SYNERGIE_ECHEANCES.map((ech) => ({
+      id: `synergie-${key}-${ech}`,
+      label: `${label} +${ech}`,
+      url: synergieGribUrl(key, reseau, ech),
+      description: `${label} — modèle GFSAFR025 (SYABAN02) — réseau ${reseau} — échéance +${ech}`,
+    })),
+  }));
 
-    return {
-      id: "synergie",
-      name: "Champs Synergie — SYABAN02",
-      contentType: "images",
-      subsections,
-    };
-  } catch {
-    return {
-      id: "synergie",
-      name: "Champs Synergie — SYABAN02",
-      contentType: "upload",
-      subsections: [{ label: "Captures Synergie (manuelles)", charts: [
-        { id: "synergie-1", label: "Carte Synergie 1", url: "", description: null },
-        { id: "synergie-2", label: "Carte Synergie 2", url: "", description: null },
-        { id: "synergie-3", label: "Carte Synergie 3", url: "", description: null },
-      ] }],
-    };
-  }
+  return {
+    id: "synergie",
+    name: "Champs Synergie — SYABAN02 (GFS live)",
+    contentType: "images",
+    subsections,
+  };
 }
 
 // ─── Main catalog builder ──────────────────────────────────────────────────────
@@ -555,7 +542,6 @@ export async function getBriefingCatalog(): Promise<BriefingCatalogResult> {
     pwSection,
     timeSeriesSection,
     lowLevSection,
-    synergieSection,
   ] = await Promise.all([
     detectGfsCycle(),
     detectEcmwfBaseTime(),
@@ -563,8 +549,9 @@ export async function getBriefingCatalog(): Promise<BriefingCatalogResult> {
     buildMisvaPwSection(),
     buildMisvaTimeSeriesSection(),
     buildMisvaLowLevSection(),
-    buildSynergieSection(),
   ]);
+
+  const synergieSection = buildSynergieSection(cycle);
 
   const ecmwfSection = ecmwfBaseTime
     ? await buildEcmwfSection(ecmwfBaseTime)

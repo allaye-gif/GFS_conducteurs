@@ -18,6 +18,24 @@ const WEBSERV_PORT = () => parseInt(process.env.SYABAN02_WEBSERV_PORT ?? "8080")
 
 const router = Router();
 
+// ─── Cache disque pour render-grib ───────────────────────────────────────────
+// Chaque rendu pilote une vraie session X11 + GUI sur SYABAN02 (10-60s, un
+// seul display partagé) — sans cache, afficher plusieurs cartes dans le
+// briefing (ou plusieurs viewers) déclencherait un rendu séquentiel à chaque
+// chargement de page. Un même (key, reseau/date, echeance) ne change de toute
+// façon pas entre deux runs GFS (~toutes les 6h), donc un TTL de 20 min suffit
+// à absorber les rechargements de page sans jamais servir un vieux run.
+const GRIB_CACHE_DIR = path.join(os.tmpdir(), "synergie-grib-cache");
+const GRIB_CACHE_TTL = 20 * 60 * 1000;
+try { fs.mkdirSync(GRIB_CACHE_DIR, { recursive: true }); } catch { /* ignore */ }
+
+function gribCacheKey(key: string, synDate: string, echeance: string, duree: string): string {
+  return path.join(GRIB_CACHE_DIR, `${key}_${synDate}_${echeance}_${duree}.png`.replace(/[^a-zA-Z0-9._-]/g, "_"));
+}
+function gribCacheValid(f: string): boolean {
+  try { return (Date.now() - fs.statSync(f).mtimeMs) < GRIB_CACHE_TTL; } catch { return false; }
+}
+
 // GET /api/synergie/archive — liste + synchro cache en arrière-plan
 router.get("/synergie/archive", async (req, res) => {
   try {
@@ -338,17 +356,30 @@ router.get("/synergie/probe-report", async (req, res) => {
 });
 
 // ─── Paramètres GFS connus pour GFSAFR025 ────────────────────────────────────
-const GFS_PARAMS: Record<string, { param: string; combinaison: string; niveau: string; label: string }> = {
-  PMER:     { param: "PMER",  combinaison: "P",   niveau: "SOL",  label: "Pression réduite mer (hPa)" },
+// Codes verifies contre /home/synergie/adminkit/config-model/config/fr/param.cfg
+// (Codename;Synergie Name;...;Definition) et coord.cfg (coordonnees verticales
+// valides : H, PV, MER, AERO, TH, P, IMMERSION, ISP — confirme dans le case
+// $COORDV de grib_modele.sh). "duree" = argument Duree de cumul (ex: pluie sur
+// 6H) ; laisser vide pour les champs instantanes (pas de cumul).
+const GFS_PARAMS: Record<string, { param: string; combinaison: string; niveau: string; duree?: string; label: string }> = {
+  PMER:     { param: "PMER", combinaison: "P", niveau: "SOL", label: "Pression réduite mer (hPa)" },
   // Niveaux 2m/10m = coordonnee verticale "H" (Hauteur), pas "P" (Pression).
   // "T2M"/"FF10" ne sont pas des codes Combinaison Synergie valides — ce sont
   // "T" et "FF" (confirme dans grib_modele.sh: H_superposition traite T|R|VV et FLUX|FF).
-  T2M:      { param: "T",    combinaison: "H",   niveau: "2M",   label: "Température 2m (°C)" },
-  FF10:     { param: "FF",   combinaison: "H",   niveau: "10M",  label: "Vent 10m (m/s)" },
-  HU850:    { param: "HUMIDITE", combinaison: "HR", niveau: "850", label: "Humidité relative 850 hPa (%)" },
-  HU700:    { param: "HUMIDITE", combinaison: "HR", niveau: "700", label: "Humidité relative 700 hPa (%)" },
-  RR3H:     { param: "RR3H", combinaison: "RR",  niveau: "SOL",  label: "Précipitations 3h (mm)" },
-  CAPE:     { param: "CAPE", combinaison: "CP",  niveau: "SOL",  label: "CAPE (J/kg)" },
+  T2M:      { param: "T",    combinaison: "H", niveau: "2M",  label: "Température 2m (°C)" },
+  FF10:     { param: "FF",   combinaison: "H", niveau: "10M", label: "Vent 10m (m/s)" },
+  // Humidite relative = code "R" (param.cfg: "R;R;...;Humidite relative = HU"),
+  // niveau pression = coordonnee "P" (comme PMER), pas "HR". Niveaux de pression
+  // portent le suffixe HPA (confirme grib_modele.sh: case "...-850HPA-...").
+  HU850:    { param: "R",    combinaison: "P", niveau: "850HPA", label: "Humidité relative 850 hPa (%)" },
+  HU700:    { param: "R",    combinaison: "P", niveau: "700HPA", label: "Humidité relative 700 hPa (%)" },
+  // Precipitations = code "PLUIE" (param.cfg: "Somme des precipitations liquides"),
+  // pas "RR3H"/"RR". La duree de cumul (3H/6H) est un argument separe du script.
+  RR3H:     { param: "PLUIE", combinaison: "P", niveau: "SOL", duree: "3H", label: "Précipitations 3h (mm)" },
+  RR6H:     { param: "PLUIE", combinaison: "P", niveau: "SOL", duree: "6H", label: "Précipitations 6h (mm)" },
+  // CAPE = code "CAPE_I" (param.cfg: "Energie potentielle instantanee convective"),
+  // pas "CAPE"/"CP" qui ne sont pas des codenames Synergie valides.
+  CAPE:     { param: "CAPE_I", combinaison: "P", niveau: "SOL", label: "CAPE (J/kg)" },
 };
 
 // ─── Utilitaire : SFTP download d'un fichier arbitraire ──────────────────────
@@ -435,6 +466,19 @@ async function handleRenderGrib(
   const rHH = reseau.replace("H", "").padStart(2, "0");
   const defDate = `${now.getUTCFullYear()}${String(now.getUTCMonth()+1).padStart(2,"0")}${String(now.getUTCDate()).padStart(2,"0")}${rHH}0000`;
   const synDate = dateArg ?? defDate;
+  const duree = cfg.duree ?? echeance;
+
+  const cached = gribCacheKey(key, synDate, echeance, duree);
+  if (gribCacheValid(cached)) {
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "public, max-age=300");
+    res.setHeader("X-Grib-Key", key);
+    res.setHeader("X-Grib-Label", cfg.label);
+    res.setHeader("X-Cache", "HIT");
+    fs.createReadStream(cached).pipe(res);
+    return;
+  }
+
   const ts = Date.now();
   const remotePng = `/tmp/synergie_grib_${key}_${ts}.png`;
 
@@ -480,7 +524,11 @@ async function handleRenderGrib(
     `GRIB_SCRIPT=$(which grib_modele.sh 2>/dev/null || find /home/synergie -name 'grib_modele.sh' 2>/dev/null | head -1)`,
     `[ -z "$GRIB_SCRIPT" ] && echo "__ERROR__ grib_modele.sh introuvable" && exit 1`,
     `echo "SCRIPT=$GRIB_SCRIPT"`,
-    `"$GRIB_SCRIPT" US2 GFSAFR025 ${cfg.param} ${cfg.combinaison} ${cfg.niveau} ${synDate} ${reseau} ${echeance} West_Africa 2>&1 &`,
+    // grib_modele.sh lit positionnellement : Modele Domaine_grib Combinaison
+    // CoordonneeVerticale Niveau Reseau(=DATE complete) Echeance Duree Domaine.
+    // Echeance (pos.7, $ECH) est passe a extr_grib_modele.sh pour choisir la
+    // bonne heure de prevision — l'inverser avec Duree affiche la mauvaise echeance.
+    `"$GRIB_SCRIPT" US2 GFSAFR025 ${cfg.param} ${cfg.combinaison} ${cfg.niveau} ${synDate} ${echeance} ${duree} West_Africa 2>&1 &`,
     // Certains parametres (ex: T2M, FF10) passent par eclate_grib_modele pour
     // decompresser le grib avant que visu_modele n'ouvre sa fenetre — ca peut
     // prendre bien plus que quelques secondes. On sonde directement la vraie
@@ -528,11 +576,13 @@ async function handleRenderGrib(
 
     const localPath = await downloadRemoteFile(remotePng);
     runSSHCommand(`rm -f "${remotePng}"`).catch(() => {});
+    fs.copyFile(localPath, cached, () => {});
 
     res.setHeader("Content-Type", "image/png");
-    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Cache-Control", "public, max-age=300");
     res.setHeader("X-Grib-Key", key);
     res.setHeader("X-Grib-Label", cfg.label);
+    res.setHeader("X-Cache", "MISS");
     const stream = fs.createReadStream(localPath);
     stream.pipe(res);
     stream.on("end", () => fs.unlink(localPath, () => {}));
