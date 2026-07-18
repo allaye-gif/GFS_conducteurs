@@ -1,0 +1,2 @@
+- [NOAA proxy et sources](noaa-sources.md) — MAG NCEP bloque les IPs datacenter (403) ; CPC/PSL URLs réelles obtenues par scraping ; WAFFGS MapServer cassé (DB) → PNG transparent ; UK Met B2C OAuth fonctionne mais WMS endpoint non trouvé.
+- [Briefing Quotidien — architecture](briefing-architecture.md) — module briefing complet : catalog GFS+ECMWF, sections images/iframe/externe, DB briefings.

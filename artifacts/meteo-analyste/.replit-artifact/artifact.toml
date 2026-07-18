@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Météo Analyste"
+version = "1.0.0"
+id = "artifacts/meteo-analyste"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20168
+
+[services.development]
+run = "pnpm --filter @workspace/meteo-analyste run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/meteo-analyste", "run", "build" ]
+publicDir = "artifacts/meteo-analyste/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20168"
+BASE_PATH = "/"

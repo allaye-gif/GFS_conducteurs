@@ -1,0 +1,638 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API pour l'outil d'analyse météorologique bihedomadaire NOAA
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: analyses
+    description: Analyses bihedomadaires
+  - name: briefings
+    description: Briefings quotidiens
+  - name: noaa
+    description: Récupération des cartes NOAA
+
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /analyses:
+    get:
+      operationId: listAnalyses
+      tags: [analyses]
+      summary: Lister toutes les analyses archivées
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Liste des analyses
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalysisList"
+    post:
+      operationId: createAnalysis
+      tags: [analyses]
+      summary: Créer une nouvelle analyse et l'archiver
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnalysisInput"
+      responses:
+        "201":
+          description: Analyse créée
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Analysis"
+
+  /analyses/summary:
+    get:
+      operationId: getAnalysesSummary
+      tags: [analyses]
+      summary: Statistiques globales des analyses archivées
+      responses:
+        "200":
+          description: Résumé des analyses
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalysesSummary"
+
+  /analyses/{id}:
+    get:
+      operationId: getAnalysis
+      tags: [analyses]
+      summary: Récupérer une analyse par ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Analyse trouvée
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Analysis"
+        "404":
+          description: Non trouvée
+    patch:
+      operationId: updateAnalysis
+      tags: [analyses]
+      summary: Mettre à jour le titre ou les notes d'une analyse
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnalysisUpdate"
+      responses:
+        "200":
+          description: Analyse mise à jour
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Analysis"
+        "404":
+          description: Non trouvée
+    delete:
+      operationId: deleteAnalysis
+      tags: [analyses]
+      summary: Supprimer une analyse
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Supprimée
+        "404":
+          description: Non trouvée
+
+  /briefings:
+    get:
+      operationId: listBriefings
+      tags: [briefings]
+      summary: Lister tous les briefings quotidiens
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Liste des briefings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BriefingList"
+    post:
+      operationId: createBriefing
+      tags: [briefings]
+      summary: Créer et archiver un briefing quotidien
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BriefingInput"
+      responses:
+        "201":
+          description: Briefing créé
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BriefingItem"
+
+  /briefings/{id}:
+    get:
+      operationId: getBriefing
+      tags: [briefings]
+      summary: Récupérer un briefing par ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Briefing trouvé
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BriefingItem"
+        "404":
+          description: Non trouvé
+    patch:
+      operationId: updateBriefing
+      tags: [briefings]
+      summary: Mettre à jour les notes d'un briefing
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BriefingUpdate"
+      responses:
+        "200":
+          description: Briefing mis à jour
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BriefingItem"
+        "404":
+          description: Non trouvé
+    delete:
+      operationId: deleteBriefing
+      tags: [briefings]
+      summary: Supprimer un briefing
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Supprimé
+        "404":
+          description: Non trouvé
+
+  /briefing/catalog:
+    get:
+      operationId: getBriefingCatalog
+      tags: [briefings]
+      summary: Catalogue des produits du briefing quotidien (GFS + ECMWF + liens externes)
+      responses:
+        "200":
+          description: Catalogue briefing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BriefingCatalog"
+
+  /noaa/charts:
+    get:
+      operationId: getNoaaCharts
+      tags: [noaa]
+      summary: Récupérer le catalogue actuel des cartes NOAA par section
+      responses:
+        "200":
+          description: Catalogue de cartes NOAA
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NoaaChartCatalog"
+
+  /noaa/proxy:
+    get:
+      operationId: proxyNoaaImage
+      tags: [noaa]
+      summary: Proxy d'images NOAA pour contourner CORS
+      parameters:
+        - name: url
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Image NOAA proxifiée
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    ChartItem:
+      type: object
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        url:
+          type: string
+        description:
+          type: ["string", "null"]
+      required:
+        - id
+        - label
+        - url
+
+    ChartSubsection:
+      type: object
+      properties:
+        label:
+          type: string
+        charts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChartItem"
+      required:
+        - label
+        - charts
+
+    NoaaSection:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        subsections:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChartSubsection"
+      required:
+        - id
+        - name
+        - subsections
+
+    NoaaChartCatalog:
+      type: object
+      properties:
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/NoaaSection"
+        gfsCycle:
+          type: string
+          description: "Cycle GFS actif détecté (ex: '12' pour 12Z)"
+        fetchedAt:
+          type: string
+      required:
+        - sections
+        - fetchedAt
+
+    SectionNotes:
+      type: object
+      description: "Observations textuelles par section (mjo, olr, nao, fit, gfs-mslp, gfs-pw, conclusion)"
+      additionalProperties:
+        type: string
+
+    Analysis:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        periodStart:
+          type: string
+        periodEnd:
+          type: string
+        notes:
+          type: ["string", "null"]
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/NoaaSection"
+        sectionNotes:
+          $ref: "#/components/schemas/SectionNotes"
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+      required:
+        - id
+        - title
+        - periodStart
+        - periodEnd
+        - sections
+        - createdAt
+        - updatedAt
+
+    AnalysisList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Analysis"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+      required:
+        - items
+        - total
+        - page
+        - limit
+
+    AnalysisInput:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+        periodStart:
+          type: string
+        periodEnd:
+          type: string
+        notes:
+          type: string
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/NoaaSection"
+        sectionNotes:
+          $ref: "#/components/schemas/SectionNotes"
+      required:
+        - title
+        - periodStart
+        - periodEnd
+        - sections
+
+    AnalysisUpdate:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+        notes:
+          type: string
+        sectionNotes:
+          $ref: "#/components/schemas/SectionNotes"
+
+    BriefingContentType:
+      type: string
+      enum: [images, iframe, external, upload]
+
+    IframeModel:
+      type: object
+      properties:
+        label:
+          type: string
+        url:
+          type: string
+      required:
+        - label
+        - url
+
+    BriefingChartItem:
+      type: object
+      properties:
+        id:
+          type: string
+        label:
+          type: string
+        url:
+          type: string
+        description:
+          type: ["string", "null"]
+      required:
+        - id
+        - label
+        - url
+
+    BriefingSubsection:
+      type: object
+      properties:
+        label:
+          type: string
+        charts:
+          type: array
+          items:
+            $ref: "#/components/schemas/BriefingChartItem"
+      required:
+        - label
+        - charts
+
+    BriefingSection:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        contentType:
+          $ref: "#/components/schemas/BriefingContentType"
+        subsections:
+          type: array
+          items:
+            $ref: "#/components/schemas/BriefingSubsection"
+        iframeUrl:
+          type: string
+        iframeAlternatives:
+          type: array
+          items:
+            $ref: "#/components/schemas/IframeModel"
+        externalUrl:
+          type: string
+        externalLabel:
+          type: string
+        externalDescription:
+          type: string
+      required:
+        - id
+        - name
+        - contentType
+        - subsections
+
+    BriefingCatalog:
+      type: object
+      properties:
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/BriefingSection"
+        gfsCycle:
+          type: string
+        ecmwfBaseTime:
+          type: ["string", "null"]
+        fetchedAt:
+          type: string
+      required:
+        - sections
+        - fetchedAt
+
+    BriefingItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        date:
+          type: string
+        title:
+          type: string
+        notes:
+          type: ["string", "null"]
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/BriefingSection"
+        sectionNotes:
+          $ref: "#/components/schemas/SectionNotes"
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+      required:
+        - id
+        - date
+        - title
+        - sections
+        - createdAt
+        - updatedAt
+
+    BriefingInput:
+      type: object
+      properties:
+        date:
+          type: string
+        title:
+          type: string
+          minLength: 1
+        notes:
+          type: string
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/BriefingSection"
+        sectionNotes:
+          $ref: "#/components/schemas/SectionNotes"
+      required:
+        - date
+        - title
+        - sections
+
+    BriefingUpdate:
+      type: object
+      properties:
+        notes:
+          type: string
+        sectionNotes:
+          $ref: "#/components/schemas/SectionNotes"
+
+    BriefingList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/BriefingItem"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+      required:
+        - items
+        - total
+        - page
+        - limit
+
+    AnalysesSummary:
+      type: object
+      properties:
+        total:
+          type: integer
+        recentAnalyses:
+          type: array
+          items:
+            $ref: "#/components/schemas/Analysis"
+        lastAnalysisDate:
+          type: ["string", "null"]
+      required:
+        - total
+        - recentAnalyses
