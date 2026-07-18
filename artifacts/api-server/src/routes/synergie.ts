@@ -564,6 +564,7 @@ async function renderGribToLocalFile(
 
   let grid: GribGrid;
   let scaleKey: keyof typeof SCALES;
+  let windBarbs: { u: number[]; v: number[] } | undefined;
 
   if (cfg.kind === "wind") {
     const [uGrid, vGrid] = await Promise.all([
@@ -573,6 +574,10 @@ async function renderGribToLocalFile(
     const values = uGrid.values.map((u, i) => Math.sqrt(u * u + (vGrid.values[i] ?? 0) ** 2));
     grid = { ...uGrid, values };
     scaleKey = cfg.scale;
+    // Direction + force du vent, en plus de l'aplat couleur (magnitude seule) —
+    // demande explicite : garder le gradient existant, juste ajouter les
+    // barbules par-dessus.
+    windBarbs = { u: uGrid.values, v: vGrid.values };
   } else {
     grid = await extractGribGrid(cfg.param, cfg.niveau, echeance, synDate, cfg.combinaison);
     scaleKey = cfg.scale;
@@ -589,6 +594,7 @@ async function renderGribToLocalFile(
     transform: scale.transform,
     contours: "contours" in scale ? scale.contours : undefined,
     overlayTime: `${rHH}00`,
+    windBarbs,
   });
 
   fs.writeFileSync(cached, svg, "utf8");

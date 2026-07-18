@@ -66,6 +66,7 @@ export interface RenderOptions {
   legendTicks?: number;
   contours?: ContourOptions;
   overlayTime?: string; // ex: "0600" — affiche en overlay sous le titre pour les cartes a isolignes
+  windBarbs?: { u: number[]; v: number[] }; // memes dimensions/emprise que la grille principale
 }
 
 // Ratio 4:3 fixe.
@@ -79,6 +80,68 @@ const STEP = 2;
 // considere comme du bruit residuel ("confetti") et n'est pas trace du tout —
 // cf. capture Synergie de reference, ou les isobares sont continues.
 const MIN_CLOSED_AREA_FRAC = 0.005;
+
+// Barbule de vent (convention meteo classique) : une hampe pointant vers la
+// direction d'ou vient le vent, avec des triangles (50 unites), des barbes
+// pleines (10) et une demi-barbe (5) pres de l'extremite — la vitesse est
+// convertie en noeuds pour ce decompte (convention universelle des barbules,
+// meme quand la donnee source est en m/s). Vent quasi nul -> petit cercle
+// ouvert ("calme").
+function windBarbSvg(x: number, y: number, u: number, v: number, color: string): string {
+  const speedMs = Math.hypot(u, v);
+  const speedKt = speedMs * 1.943844;
+  if (speedKt < 2.5) {
+    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.8" fill="none" stroke="${color}" stroke-width="1"/>`;
+  }
+
+  // bearingTo = direction vers laquelle souffle le vent (deg, 0=N, sens horaire).
+  const bearingTo = ((Math.atan2(u, v) * 180) / Math.PI + 360) % 360;
+  const bearingFrom = (bearingTo + 180) % 360;
+  const rad = (bearingFrom * Math.PI) / 180;
+  const dirX = Math.sin(rad);
+  const dirY = -Math.cos(rad);
+  const perpX = dirY;
+  const perpY = -dirX;
+
+  const shaftLen = 20;
+  const tipX = x + dirX * shaftLen;
+  const tipY = y + dirY * shaftLen;
+  const parts = [`<line x1="${x.toFixed(1)}" y1="${y.toFixed(1)}" x2="${tipX.toFixed(1)}" y2="${tipY.toFixed(1)}" stroke="${color}" stroke-width="1.1"/>`];
+
+  let rounded = Math.round(speedKt / 5) * 5;
+  const pennants = Math.floor(rounded / 50);
+  rounded %= 50;
+  const fullBarbs = Math.floor(rounded / 10);
+  rounded %= 10;
+  const halfBarb = rounded >= 5;
+
+  const spacing = 3.6;
+  const barbLen = 7.5;
+  const halfLen = 4;
+  let pos = shaftLen;
+
+  for (let i = 0; i < pennants; i++) {
+    const baseX = x + dirX * pos, baseY = y + dirY * pos;
+    const nextPos = pos - spacing * 1.6;
+    const innerX = x + dirX * nextPos, innerY = y + dirY * nextPos;
+    const outX = baseX + perpX * barbLen, outY = baseY + perpY * barbLen;
+    parts.push(`<polygon points="${baseX.toFixed(1)},${baseY.toFixed(1)} ${outX.toFixed(1)},${outY.toFixed(1)} ${innerX.toFixed(1)},${innerY.toFixed(1)}" fill="${color}"/>`);
+    pos = nextPos;
+  }
+  for (let i = 0; i < fullBarbs; i++) {
+    const baseX = x + dirX * pos, baseY = y + dirY * pos;
+    const outX = baseX + perpX * barbLen, outY = baseY + perpY * barbLen;
+    parts.push(`<line x1="${baseX.toFixed(1)}" y1="${baseY.toFixed(1)}" x2="${outX.toFixed(1)}" y2="${outY.toFixed(1)}" stroke="${color}" stroke-width="1.3"/>`);
+    pos -= spacing;
+  }
+  if (halfBarb) {
+    const baseX = x + dirX * pos, baseY = y + dirY * pos;
+    const outX = baseX + perpX * halfLen, outY = baseY + perpY * halfLen;
+    parts.push(`<line x1="${baseX.toFixed(1)}" y1="${baseY.toFixed(1)}" x2="${outX.toFixed(1)}" y2="${outY.toFixed(1)}" stroke="${color}" stroke-width="1.3"/>`);
+  }
+
+  return parts.join("");
+}
 
 function polygonAreaPx(points: [number, number][]): number {
   let area = 0;
@@ -128,6 +191,27 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
         const x = xFor(lon);
         const y = yFor(lat) - cellH; // le rect couvre vers le nord depuis ce point
         rects.push(`<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(cellW + 0.6).toFixed(1)}" height="${(cellH + 0.6).toFixed(1)}" fill="${color}"/>`);
+      }
+    }
+  }
+
+  // Barbules de vent — echantillonnees sur une grille plus lache que le champ
+  // couleur (sinon illisible), dessinees par-dessus tout le reste (aplat,
+  // cotes, frontieres) pour rester visibles, comme sur une vraie carte vent.
+  const windBarbMarkers: string[] = [];
+  if (opts.windBarbs) {
+    const { u, v } = opts.windBarbs;
+    const BARB_STEP = Math.max(4, Math.round(ni / 22));
+    for (let row = 0; row < nj; row += BARB_STEP) {
+      const lat = lat0 + (row / (nj - 1)) * latSpan;
+      for (let col = 0; col < ni; col += BARB_STEP) {
+        const lon = lon0 + (col / (ni - 1)) * lonSpan;
+        const uVal = u[row * ni + col];
+        const vVal = v[row * ni + col];
+        if (uVal === undefined || vVal === undefined) continue;
+        const x = xFor(lon);
+        const y = yFor(lat);
+        windBarbMarkers.push(windBarbSvg(x, y, uVal, vVal, "#0f172a"));
       }
     }
   }
@@ -376,6 +460,7 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   <g>${ridgeTroughLabels.join("")}</g>
   <g>${extremaMarkers.join("")}</g>
   <g>${cityMarkers.join("")}</g>
+  <g clip-path="url(#plotClip)">${windBarbMarkers.join("")}</g>
   <rect x="${MARGIN.left}" y="${MARGIN.top}" width="${PLOT_W}" height="${PLOT_H}" fill="none" stroke="#000000" stroke-width="1"/>
   ${header}
   ${legendBox}

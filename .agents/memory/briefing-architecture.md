@@ -288,6 +288,29 @@ spécifiquement sur la carte TA. Trois ajustements :
   vraie densité de contour élevée. Résultat visuel nettement plus proche de la
   référence Synergie (dense, organique, sans motif répétitif).
 
+## Barbules de vent sur FF10/FF850 (juillet 2026)
+
+Retour utilisateur sur une capture Synergie "Vent" + une capture UK Met Office
+Africa Viewer : l'aplat couleur existant est bon, il manque juste les
+barbules (direction + force du vent), à ajouter *par-dessus* le gradient
+existant — pas une refonte complète du style FF10.
+- `windBarbSvg()` dans `grib-render.ts` : convention météo classique — hampe
+  pointant vers la direction d'où vient le vent, triangles (50 kt), barbes
+  pleines (10 kt), demi-barbe (5 kt) ; vitesse convertie en nœuds pour ce
+  décompte (convention universelle des barbules même si la donnée est en m/s).
+  Vent quasi nul (< 2.5 kt) → petit cercle ouvert ("calme").
+- `RenderOptions.windBarbs?: { u, v }` — nouvelle option, U/V bruts (pas la
+  magnitude déjà utilisée pour l'aplat), échantillonnés sur une grille plus
+  lâche que le champ couleur (`BARB_STEP = round(ni/22)`, sinon illisible).
+  Dessinées par-dessus tout (aplat, côtes, frontières).
+- `routes/synergie.ts` : tout `WindParamDef` (donc FF10 ET FF850
+  automatiquement, même chemin de code) passe maintenant `windBarbs: {u: uGrid.
+  values, v: vGrid.values}` en plus de la magnitude pour l'aplat.
+- Testé avec un champ synthétique mousson/harmattan (flux SO au sud, NE au
+  nord, transition vers 9-10°N) : barbules orientées correctement dans les
+  deux régimes, cercles "calme" exactement à la latitude de convergence où la
+  vitesse s'annule.
+
 ## ECMWF API format
 ```
 GET https://charts.ecmwf.int/opencharts-api/v1/products/medium-mslp-rain/?base_time={ISO}&valid_time={ISO}&projection=opencharts_africa
