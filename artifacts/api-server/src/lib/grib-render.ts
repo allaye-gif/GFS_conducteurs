@@ -1,4 +1,20 @@
 import type { GribGrid } from "./grib-extract.js";
+import { COASTLINE_WEST_AFRICA } from "./grib-coastline.js";
+
+// Reperes visuels : quelques capitales/grandes villes d'Afrique de l'Ouest pour
+// s'orienter sur la carte sans avoir a deviner a partir du seul quadrillage.
+const CITIES: { name: string; lon: number; lat: number }[] = [
+  { name: "Bamako", lon: -7.99, lat: 12.65 },
+  { name: "Dakar", lon: -17.45, lat: 14.72 },
+  { name: "Nouakchott", lon: -15.98, lat: 18.09 },
+  { name: "Conakry", lon: -13.71, lat: 9.64 },
+  { name: "Abidjan", lon: -4.02, lat: 5.32 },
+  { name: "Ouagadougou", lon: -1.53, lat: 12.37 },
+  { name: "Niamey", lon: 2.11, lat: 13.51 },
+  { name: "Accra", lon: -0.19, lat: 5.56 },
+  { name: "Lagos", lon: 3.38, lat: 6.52 },
+  { name: "Alger", lon: 3.06, lat: 36.75 },
+];
 
 export type ColorStop = { at: number; color: [number, number, number] };
 
@@ -72,6 +88,28 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
     }
   }
 
+  // Traits de côte — dessines par-dessus le remplissage couleur pour rester
+  // visibles, avec un clip pour ne jamais deborder de la zone du graphique.
+  const coastPaths: string[] = [];
+  for (const line of COASTLINE_WEST_AFRICA) {
+    const d = line
+      .map(([lon, lat], i) => `${i === 0 ? "M" : "L"}${xFor(lon).toFixed(1)},${yFor(lat).toFixed(1)}`)
+      .join(" ");
+    coastPaths.push(`<path d="${d}" fill="none" stroke="#1e293b" stroke-width="1" stroke-linejoin="round" clip-path="url(#plotClip)"/>`);
+  }
+
+  // Villes de repère
+  const cityMarkers: string[] = [];
+  for (const city of CITIES) {
+    if (city.lon < lon0 || city.lon > lon1 || city.lat < lat0 || city.lat > lat1) continue;
+    const x = xFor(city.lon);
+    const y = yFor(city.lat);
+    cityMarkers.push(
+      `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.5" fill="#0f172a" stroke="#ffffff" stroke-width="0.8"/>` +
+      `<text x="${(x + 5).toFixed(1)}" y="${(y + 3.5).toFixed(1)}" font-size="10.5" fill="#0f172a" paint-order="stroke" stroke="#ffffff" stroke-width="3">${escapeXml(city.name)}</text>`
+    );
+  }
+
   // Grille lat/lon + labels
   const gridLines: string[] = [];
   const lonStep = lonSpan > 40 ? 10 : 5;
@@ -110,11 +148,16 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   }
 
   return `<svg viewBox="0 0 ${WIDTH} ${HEIGHT}" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif">
+  <defs>
+    <clipPath id="plotClip"><rect x="${MARGIN.left}" y="${MARGIN.top}" width="${PLOT_W}" height="${PLOT_H}"/></clipPath>
+  </defs>
   <rect x="0" y="0" width="${WIDTH}" height="${HEIGHT}" fill="#ffffff"/>
   <text x="${MARGIN.left}" y="26" font-size="18" font-weight="600" fill="#0f172a">${escapeXml(opts.title)}</text>
   <text x="${MARGIN.left}" y="44" font-size="12" fill="#64748b">${escapeXml(opts.subtitle)}</text>
   <g>${rects.join("")}</g>
   <g>${gridLines.join("")}</g>
+  <g>${coastPaths.join("")}</g>
+  <g>${cityMarkers.join("")}</g>
   <rect x="${MARGIN.left}" y="${MARGIN.top}" width="${PLOT_W}" height="${PLOT_H}" fill="none" stroke="#1e293b" stroke-width="1"/>
   <g>${legendRects.join("")}</g>
   <rect x="${legendX}" y="${legendY}" width="${legendW}" height="${legendH}" fill="none" stroke="#1e293b" stroke-width="1"/>
