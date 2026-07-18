@@ -340,8 +340,11 @@ router.get("/synergie/probe-report", async (req, res) => {
 // ─── Paramètres GFS connus pour GFSAFR025 ────────────────────────────────────
 const GFS_PARAMS: Record<string, { param: string; combinaison: string; niveau: string; label: string }> = {
   PMER:     { param: "PMER",  combinaison: "P",   niveau: "SOL",  label: "Pression réduite mer (hPa)" },
-  T2M:      { param: "T2M",  combinaison: "TT",  niveau: "2M",   label: "Température 2m (°C)" },
-  FF10:     { param: "FF10", combinaison: "FF",  niveau: "10M",  label: "Vent 10m (m/s)" },
+  // Niveaux 2m/10m = coordonnee verticale "H" (Hauteur), pas "P" (Pression).
+  // "T2M"/"FF10" ne sont pas des codes Combinaison Synergie valides — ce sont
+  // "T" et "FF" (confirme dans grib_modele.sh: H_superposition traite T|R|VV et FLUX|FF).
+  T2M:      { param: "T",    combinaison: "H",   niveau: "2M",   label: "Température 2m (°C)" },
+  FF10:     { param: "FF",   combinaison: "H",   niveau: "10M",  label: "Vent 10m (m/s)" },
   HU850:    { param: "HUMIDITE", combinaison: "HR", niveau: "850", label: "Humidité relative 850 hPa (%)" },
   HU700:    { param: "HUMIDITE", combinaison: "HR", niveau: "700", label: "Humidité relative 700 hPa (%)" },
   RR3H:     { param: "RR3H", combinaison: "RR",  niveau: "SOL",  label: "Précipitations 3h (mm)" },
@@ -463,19 +466,37 @@ async function handleRenderGrib(
     `fi`,
     `export DISPLAY=:$DISPNUM`,
     `echo "DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY"`,
+    `MY_PID=$$`,
+    // Nettoyage : tuer tout visu_modele/grib_modele.sh laissé par un rendu precedent.
+    // Sans ca, la capture ci-dessous peut recuperer une fenetre perimee (rendu passe
+    // jamais ferme) au lieu du rendu qu'on vient de demander — c'est la cause du bug
+    // "donnees anciennes" : le process precedent ne se termine jamais tout seul.
+    // On exclut explicitement notre propre PID ($MY_PID) : pkill -f matcherait aussi
+    // CE script lui-meme (son texte contient litteralement "grib_modele.sh"/"visu_modele"
+    // dans les commandes which/grep ci-dessous), ce qui le tuerait en plein milieu.
+    `ps aux 2>/dev/null | grep -iE 'grib_modele\\.sh|visu_modele' | grep -v grep | awk -v me="$MY_PID" '$2 != me {print $2}' | xargs -r kill -9 2>/dev/null`,
+    `sleep 1`,
     // Lancer grib_modele.sh (ouvre visu_modele sur :0)
     `GRIB_SCRIPT=$(which grib_modele.sh 2>/dev/null || find /home/synergie -name 'grib_modele.sh' 2>/dev/null | head -1)`,
     `[ -z "$GRIB_SCRIPT" ] && echo "__ERROR__ grib_modele.sh introuvable" && exit 1`,
     `echo "SCRIPT=$GRIB_SCRIPT"`,
     `"$GRIB_SCRIPT" US2 GFSAFR025 ${cfg.param} ${cfg.combinaison} ${cfg.niveau} ${synDate} ${reseau} ${echeance} West_Africa 2>&1 &`,
+    // Certains parametres (ex: T2M, FF10) passent par eclate_grib_modele pour
+    // decompresser le grib avant que visu_modele n'ouvre sa fenetre — ca peut
+    // prendre bien plus que quelques secondes. On sonde directement la vraie
+    // fenetre (pas juste la presence du process) jusqu'a 60s, plutot qu'un
+    // delai fixe trop court qui retombe sur une capture root inutilisable.
     `WAITED=0`,
-    `while [ $WAITED -lt 25 ]; do`,
-    `  ps aux 2>/dev/null | grep -q '[v]isu_modele' && echo "visu_modele_ok waited=$WAITED" && break`,
+    `WIN_ID=""`,
+    `while [ $WAITED -lt 60 ]; do`,
+    `  WIN_ID=$(/usr/bin/xwininfo -root -tree 2>/dev/null | grep -i 'visu_modele' | grep -v '1x1+0+0' | awk '{print $1}' | head -1)`,
+    `  [ -n "$WIN_ID" ] && echo "window_found waited=$WAITED id=$WIN_ID" && break`,
     `  sleep 1`,
     `  WAITED=$(expr $WAITED + 1)`,
     `done`,
-    `sleep 3`,
-    `WIN_ID=$(/usr/bin/xwininfo -root -tree 2>/dev/null | grep -i 'visu' | awk '{print $1}' | head -1)`,
+    `sleep 2`,
+    // Re-verifie apres le settle (la fenetre a pu changer/se redessiner)
+    `WIN_ID=$(/usr/bin/xwininfo -root -tree 2>/dev/null | grep -i 'visu_modele' | grep -v '1x1+0+0' | awk '{print $1}' | head -1)`,
     `if [ -n "$WIN_ID" ]; then`,
     `  echo "WINDOW=$WIN_ID"`,
     `  /usr/bin/import -window "$WIN_ID" "${remotePng}" 2>&1`,
@@ -484,6 +505,8 @@ async function handleRenderGrib(
     `  /usr/bin/import -window root "${remotePng}" 2>&1`,
     `fi`,
     `echo "__RENDER_OK__"`,
+    // Nettoyage post-capture : ne pas laisser trainer ce rendu pour l'appel suivant
+    `ps aux 2>/dev/null | grep -iE 'grib_modele\\.sh|visu_modele' | grep -v grep | awk -v me="$MY_PID" '$2 != me {print $2}' | xargs -r kill -9 2>/dev/null`,
   ].join("\n");
 
   try {
