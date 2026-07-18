@@ -1,6 +1,7 @@
 import "./load-env.js";
 import app from "./app";
 import { logger } from "./lib/logger";
+import { startSynergieWarmScheduler } from "./routes/synergie.js";
 
 const rawPort = process.env["PORT"] ?? process.env["API_PORT"] ?? "8090";
 
@@ -17,4 +18,5 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+  startSynergieWarmScheduler(logger);
 });

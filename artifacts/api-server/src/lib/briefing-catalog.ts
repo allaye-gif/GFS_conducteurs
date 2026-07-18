@@ -1,4 +1,5 @@
 import { getWaffgsLatestTime } from "./waffgs-proxy";
+import { computeSynergieReseau } from "./synergie-sftp.js";
 
 export type BriefingContentType = "images" | "iframe" | "external" | "upload";
 
@@ -507,14 +508,18 @@ const SYNERGIE_LIVE_PARAMS: { key: string; label: string }[] = [
   { key: "RR6H",  label: "Précipitations 6h" },
   { key: "CAPE",  label: "CAPE" },
 ];
-const SYNERGIE_ECHEANCES = ["00H", "06H", "12H", "18H"];
+// Une seule echeance pour l'instant : chaque carte pilote un vrai rendu GUI sur
+// l'unique display X11 partage de SYABAN02 (rendus serialises, voir
+// withGribLock dans routes/synergie.ts) — 7 params x 4 echeances aurait pris
+// bien trop longtemps a charger sur un cache froid.
+const SYNERGIE_ECHEANCES = ["00H"];
 
 function synergieGribUrl(key: string, reseau: string, echeance: string): string {
   return `/api/synergie/render-grib?key=${encodeURIComponent(key)}&reseau=${encodeURIComponent(reseau)}&echeance=${encodeURIComponent(echeance)}`;
 }
 
-function buildSynergieSection(cycle: string): BriefingSection {
-  const reseau = `${cycle}H`;
+function buildSynergieSection(): BriefingSection {
+  const reseau = computeSynergieReseau();
   const subsections = SYNERGIE_LIVE_PARAMS.map(({ key, label }) => ({
     label: `${label} — GFSAFR025 réseau ${reseau}`,
     charts: SYNERGIE_ECHEANCES.map((ech) => ({
@@ -551,7 +556,7 @@ export async function getBriefingCatalog(): Promise<BriefingCatalogResult> {
     buildMisvaLowLevSection(),
   ]);
 
-  const synergieSection = buildSynergieSection(cycle);
+  const synergieSection = buildSynergieSection();
 
   const ecmwfSection = ecmwfBaseTime
     ? await buildEcmwfSection(ecmwfBaseTime)

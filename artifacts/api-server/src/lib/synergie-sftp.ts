@@ -14,6 +14,17 @@ export type SynergieFile = {
   size: number; mtime: number; url: string;
 };
 
+// Cycle GFS reellement disponible sur SYABAN02 : independant de detectGfsCycle()
+// (briefing-catalog.ts), qui se base sur des images NOAA publiques et ne reflete
+// pas forcement ce que SYABAN02 a recu/indexe en interne. Le cycle le plus
+// recent avec au moins 2h de marge (reception + extraction + eclatement grib).
+export function computeSynergieReseau(): string {
+  const nowHour = new Date().getUTCHours();
+  const candidates = [18, 12, 6, 0];
+  const chosen = candidates.find((c) => nowHour - c >= 2) ?? 18;
+  return `${String(chosen).padStart(2, "0")}H`;
+}
+
 const IMG_EXT  = /\.(png|jpg|jpeg|gif)$/i;
 const MIN_SIZE = 10_000;
 

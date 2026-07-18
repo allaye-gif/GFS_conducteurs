@@ -6,7 +6,7 @@ import * as http from "http";
 import {
   listSynergieArchive, syncArchiveToCache,
   getCachedFile, localCachePath, resolveArchivePath,
-  openSFTP, runSSHCommand, readRemoteFile,
+  openSFTP, runSSHCommand, readRemoteFile, computeSynergieReseau,
 } from "../lib/synergie-sftp.js";
 
 const MIME: Record<string, string> = {
@@ -20,13 +20,21 @@ const router = Router();
 
 // ─── Cache disque pour render-grib ───────────────────────────────────────────
 // Chaque rendu pilote une vraie session X11 + GUI sur SYABAN02 (10-60s, un
-// seul display partagé) — sans cache, afficher plusieurs cartes dans le
-// briefing (ou plusieurs viewers) déclencherait un rendu séquentiel à chaque
-// chargement de page. Un même (key, reseau/date, echeance) ne change de toute
-// façon pas entre deux runs GFS (~toutes les 6h), donc un TTL de 20 min suffit
-// à absorber les rechargements de page sans jamais servir un vieux run.
+// seul display partagé). Les données GFS extraites sur SYABAN02 (tmp_modele)
+// se comportent comme un tampon transitoire : une carte qui rend correctement
+// à un instant T peut redevenir vide 30 min plus tard si la fenêtre de
+// disponibilité est passée. Le cache est donc volontairement long (~7h, plus
+// d'un cycle GFS) et n'est écrasé QUE par un rendu qui contient vraiment des
+// données (voir MIN_VALID_GRIB_SIZE) — un rendu vide/échoué ne remplace jamais
+// un dernier bon rendu en cache. Un job d'arrière-plan (voir
+// startSynergieWarmScheduler) tente de le rafraîchir toutes les 20 min pour
+// maximiser les chances de capturer la fenêtre utile de chaque cycle.
 const GRIB_CACHE_DIR = path.join(os.tmpdir(), "synergie-grib-cache");
-const GRIB_CACHE_TTL = 20 * 60 * 1000;
+const GRIB_CACHE_TTL = 7 * 60 * 60 * 1000;
+// En dessous de ce seuil, la carte est très probablement un fond de carte vide
+// (pas de données) plutôt qu'un vrai rendu — observé empiriquement : les rendus
+// vides font ~19-20 Ko, les rendus avec données réelles 44-112 Ko.
+const MIN_VALID_GRIB_SIZE = 25_000;
 try { fs.mkdirSync(GRIB_CACHE_DIR, { recursive: true }); } catch { /* ignore */ }
 
 function gribCacheKey(key: string, synDate: string, echeance: string, duree: string): string {
@@ -34,6 +42,20 @@ function gribCacheKey(key: string, synDate: string, echeance: string, duree: str
 }
 function gribCacheValid(f: string): boolean {
   try { return (Date.now() - fs.statSync(f).mtimeMs) < GRIB_CACHE_TTL; } catch { return false; }
+}
+
+// ─── Verrou de rendu ──────────────────────────────────────────────────────────
+// SYABAN02 n'a qu'un seul display X11 partage — deux rendus en parallele se
+// marchent dessus (le nettoyage pre-lancement de l'un tue le rendu en cours de
+// l'autre), produisant des captures vides/corrompues ou le bureau entier. Le
+// briefing charge plusieurs cartes en parallele (une <img> par graphique), donc
+// on serialise ici : un seul rendu X11 a la fois sur SYABAN02, les autres
+// attendent leur tour au lieu de se percuter.
+let gribRenderChain: Promise<unknown> = Promise.resolve();
+function withGribLock<T>(fn: () => Promise<T>): Promise<T> {
+  const result = gribRenderChain.then(fn, fn);
+  gribRenderChain = result.then(() => undefined, () => undefined);
+  return result;
 }
 
 // GET /api/synergie/archive — liste + synchro cache en arrière-plan
@@ -449,16 +471,15 @@ router.get("/synergie/x11-windows", async (req, res) => {
   }
 });
 
-// ─── Helper commun render-grib (GET + POST) ──────────────────────────────────
-async function handleRenderGrib(
-  key: string, reseau: string, echeance: string, dateArg: string | undefined,
-  log: { info: (o: object, m: string) => void; warn: (o: object, m: string) => void },
-  res: import("express").Response
-) {
+type RenderLogger = { info: (o: object, m: string) => void; warn: (o: object, m: string) => void };
+
+// ─── Rendu GRIB pur (reutilise par la route HTTP et par le warmer d'arriere-plan) ──
+async function renderGribToLocalFile(
+  key: string, reseau: string, echeance: string, dateArg: string | undefined, log: RenderLogger
+): Promise<{ localPath: string; cfg: (typeof GFS_PARAMS)[string]; fromCache: boolean; size: number }> {
   const cfg = GFS_PARAMS[key];
   if (!cfg) {
-    res.status(400).json({ error: `Paramètre inconnu: ${key}. Valides: ${Object.keys(GFS_PARAMS).join(", ")}` });
-    return;
+    throw new Error(`Paramètre inconnu: ${key}. Valides: ${Object.keys(GFS_PARAMS).join(", ")}`);
   }
 
   // Date réseau Synergie (YYYYMMDDHHMMSS)
@@ -470,16 +491,16 @@ async function handleRenderGrib(
 
   const cached = gribCacheKey(key, synDate, echeance, duree);
   if (gribCacheValid(cached)) {
-    res.setHeader("Content-Type", "image/png");
-    res.setHeader("Cache-Control", "public, max-age=300");
-    res.setHeader("X-Grib-Key", key);
-    res.setHeader("X-Grib-Label", cfg.label);
-    res.setHeader("X-Cache", "HIT");
-    fs.createReadStream(cached).pipe(res);
-    return;
+    return { localPath: cached, cfg, fromCache: true, size: fs.statSync(cached).size };
   }
 
-  const ts = Date.now();
+  return withGribLock(async () => {
+    // Un autre appel a peut-etre deja rempli le cache pendant qu'on attendait le verrou
+    if (gribCacheValid(cached)) {
+      return { localPath: cached, cfg, fromCache: true, size: fs.statSync(cached).size };
+    }
+
+    const ts = Date.now();
   const remotePng = `/tmp/synergie_grib_${key}_${ts}.png`;
 
   // Script bash multi-lignes — XAUTHORITY auto-discovery pour SSH sans cookie X11
@@ -557,35 +578,52 @@ async function handleRenderGrib(
     `ps aux 2>/dev/null | grep -iE 'grib_modele\\.sh|visu_modele' | grep -v grep | awk -v me="$MY_PID" '$2 != me {print $2}' | xargs -r kill -9 2>/dev/null`,
   ].join("\n");
 
-  try {
     log.info({ key, synDate, reseau, echeance }, "render-grib: démarrage");
     const { stdout, stderr } = await runSSHCommand(script.trim().replace(/\n/g, "\n"));
 
     if (stdout.includes("__ERROR__")) {
-      res.status(500).json({ error: "Environnement Synergie", detail: stdout + stderr }); return;
+      throw new Error(`Environnement Synergie: ${stdout}${stderr}`);
     }
     if (!stdout.includes("__RENDER_OK__")) {
-      res.status(500).json({ error: "Rendu échoué", detail: stdout + stderr }); return;
+      throw new Error(`Rendu échoué: ${stdout}${stderr}`);
     }
 
     // Vérifier taille PNG
     const { stdout: sz } = await runSSHCommand(`stat -c %s "${remotePng}" 2>/dev/null || echo 0`);
-    if (parseInt(sz.trim()) < 2000) {
-      res.status(500).json({ error: "PNG trop petit ou absent", size: sz.trim(), log: stdout }); return;
+    const size = parseInt(sz.trim()) || 0;
+    if (size < 2000) {
+      throw new Error(`PNG trop petit ou absent (${size} octets)`);
     }
 
     const localPath = await downloadRemoteFile(remotePng);
     runSSHCommand(`rm -f "${remotePng}"`).catch(() => {});
-    fs.copyFile(localPath, cached, () => {});
 
+    if (size >= MIN_VALID_GRIB_SIZE) {
+      fs.copyFile(localPath, cached, () => {});
+    } else {
+      log.warn({ key, reseau, echeance, size }, "render-grib: carte probablement vide (pas de données) — pas mise en cache long terme");
+    }
+
+    return { localPath, cfg, fromCache: false, size };
+  });
+}
+
+// ─── Helper commun render-grib (GET + POST) ──────────────────────────────────
+async function handleRenderGrib(
+  key: string, reseau: string, echeance: string, dateArg: string | undefined,
+  log: RenderLogger,
+  res: import("express").Response
+) {
+  try {
+    const { localPath, cfg, fromCache } = await renderGribToLocalFile(key, reseau, echeance, dateArg, log);
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Cache-Control", "public, max-age=300");
     res.setHeader("X-Grib-Key", key);
     res.setHeader("X-Grib-Label", cfg.label);
-    res.setHeader("X-Cache", "MISS");
+    res.setHeader("X-Cache", fromCache ? "HIT" : "MISS");
     const stream = fs.createReadStream(localPath);
     stream.pipe(res);
-    stream.on("end", () => fs.unlink(localPath, () => {}));
+    if (!fromCache) stream.on("end", () => fs.unlink(localPath, () => {}));
     stream.on("error", (e) => { if (!res.headersSent) res.status(500).json({ error: String(e) }); });
   } catch (err) {
     log.warn({ err }, "render-grib: error");
@@ -601,6 +639,33 @@ router.get("/synergie/render-grib", async (req, res) => {
   const dateArg = req.query["date"] ? String(req.query["date"]) : undefined;
   await handleRenderGrib(key, reseau, echeance, dateArg, req.log, res);
 });
+
+// ─── Warmer d'arrière-plan ────────────────────────────────────────────────────
+// Pré-génère les cartes Synergie a intervalle regulier plutot que d'attendre
+// qu'un utilisateur ouvre le briefing. Ca augmente les chances de tomber dans
+// la fenetre ou les donnees GFS sont reellement extraites sur SYABAN02, et
+// alimente le cache long terme (7h) consulte par la route HTTP ci-dessus.
+const WARM_ECHEANCE = "00H";
+let warmTimer: ReturnType<typeof setInterval> | null = null;
+
+async function warmSynergieCache(log: RenderLogger): Promise<void> {
+  const reseau = computeSynergieReseau();
+  for (const key of Object.keys(GFS_PARAMS)) {
+    try {
+      const { fromCache, size } = await renderGribToLocalFile(key, reseau, WARM_ECHEANCE, undefined, log);
+      log.info({ key, reseau, fromCache, size }, "synergie warm: ok");
+    } catch (err) {
+      log.warn({ key, reseau, err }, "synergie warm: échoué");
+    }
+  }
+}
+
+export function startSynergieWarmScheduler(log: RenderLogger, intervalMs = 20 * 60 * 1000): void {
+  if (warmTimer) return;
+  const run = () => { warmSynergieCache(log).catch(() => {}); };
+  run();
+  warmTimer = setInterval(run, intervalMs);
+}
 
 // POST /api/synergie/render-grib  (body JSON: { key, reseau, echeance, date? })
 router.post("/synergie/render-grib", async (req, res) => {
