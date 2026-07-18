@@ -505,9 +505,11 @@ const SYNERGIE_LIVE_PARAMS: { key: string; label: string }[] = [
   { key: "PMER",  label: "Pression réduite mer" },
   { key: "T2M",   label: "Température 2m" },
   { key: "FF10",  label: "Vent 10m" },
+  { key: "FF850", label: "Flux 850 hPa" },
   { key: "HU850", label: "Humidité relative 850 hPa" },
   { key: "HU700", label: "Humidité relative 700 hPa" },
   { key: "RR6H",  label: "Précipitations 6h" },
+  { key: "TOURCOMBO", label: "Tourbillon absolu 850/700/200 hPa" },
 ];
 // Une seule echeance pour l'instant : chaque carte pilote un vrai rendu GUI sur
 // l'unique display X11 partage de SYABAN02 (rendus serialises, voir

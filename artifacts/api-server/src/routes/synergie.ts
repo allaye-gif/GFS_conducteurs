@@ -10,6 +10,8 @@ import {
 } from "../lib/synergie-sftp.js";
 import { extractGribGrid, type GribGrid } from "../lib/grib-extract.js";
 import { renderGribSvg, SCALES, type ColorStop } from "../lib/grib-render.js";
+import { computeAbsoluteVorticityX1e7 } from "../lib/grib-vorticity.js";
+import { renderVorticityComboSvg, type VorticityLayer } from "../lib/grib-vorticity-render.js";
 
 const MIME: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
@@ -371,16 +373,27 @@ type ScalarParamDef = {
 type WindParamDef = {
   kind: "wind";
   combinaison: string; niveau: string;
-  scale: "wind"; label: string;
+  scale: "wind" | "windUpper"; label: string;
 };
-type ParamDef = ScalarParamDef | WindParamDef;
+// Champ special : superposition du tourbillon absolu a 3 niveaux pour reperer
+// le couplage convergence basse couche (850/700 hPa) / divergence en altitude
+// (200 hPa) — cf. grib-vorticity.ts / grib-vorticity-render.ts pour le detail.
+type VorticityComboParamDef = {
+  kind: "vorticity-combo";
+  label: string;
+};
+type ParamDef = ScalarParamDef | WindParamDef | VorticityComboParamDef;
 
 const GFS_PARAMS: Record<string, ParamDef> = {
   PMER:  { kind: "scalar", param: "PMER",   combinaison: "P", niveau: "SOL",    scale: "pmer",     label: "Pression réduite mer (hPa)" },
   // Niveaux 2m/10m = coordonnee verticale "H" (Hauteur), pas "P" (Pression).
   T2M:   { kind: "scalar", param: "T",      combinaison: "H", niveau: "2M",     scale: "temp",     label: "Température 2m (°C)" },
   // Vent = magnitude calculee depuis U+V (pas de champ FF stocke tel quel).
-  FF10:  { kind: "wind",                    combinaison: "H", niveau: "10M",    scale: "wind",     label: "Vent 10m (m/s)" },
+  FF10:  { kind: "wind",                    combinaison: "H", niveau: "10M",    scale: "wind",      label: "Vent 10m (m/s)" },
+  // Flux en altitude = meme calcul U/V mais niveau de pression (comme HU850) —
+  // plage de vent plus large (scale "windUpper") car le flux d'est africain
+  // vers 850 hPa peut depasser largement le vent de surface.
+  FF850: { kind: "wind",                    combinaison: "P", niveau: "850HPA", scale: "windUpper", label: "Flux 850 hPa (m/s)" },
   // Humidite relative = code "R", niveau pression = coordonnee "P" (comme PMER).
   // Niveaux de pression portent le suffixe HPA.
   HU850: { kind: "scalar", param: "R",      combinaison: "P", niveau: "850HPA", scale: "humidity", label: "Humidité relative 850 hPa (%)" },
@@ -394,6 +407,7 @@ const GFS_PARAMS: Record<string, ParamDef> = {
   // couche de profondeur (M0_10cm, M10_40cm...), pas a de l'energie convective —
   // confirme par inspection directe du catalogue GRIB. Le CAPE n'est simplement
   // pas dans le flux recu sur cette station.
+  TOURCOMBO: { kind: "vorticity-combo", label: "Tourbillon absolu 850/700/200 hPa (couplage)" },
 };
 
 // ─── Utilitaire : SFTP download d'un fichier arbitraire ──────────────────────
@@ -493,6 +507,61 @@ async function renderGribToLocalFile(
 
   log.info({ key, synDate, reseau, echeance }, "render-grib: extraction");
 
+  // Champ special : 3 niveaux x 2 composantes (U/V) -> 3 tourbillons absolus
+  // superposes en isolignes denses (pas d'aplat, pas de lissage, pas de filtre
+  // anti-confetti — cf. grib-vorticity-render.ts : contrairement a PMER, la
+  // texture fine et turbulente EST le signal utile ici) — traite a part avant
+  // le chemin scalar/wind commun.
+  if (cfg.kind === "vorticity-combo") {
+    const NIVEAUX = ["850HPA", "700HPA", "200HPA"] as const;
+    const grids = await Promise.all(
+      NIVEAUX.map(async (niveau) => {
+        const [uGrid, vGrid] = await Promise.all([
+          extractGribGrid("U", niveau, echeance, synDate, "P"),
+          extractGribGrid("V", niveau, echeance, synDate, "P"),
+        ]);
+        return { niveau, grid: uGrid, values: computeAbsoluteVorticityX1e7(uGrid, vGrid) };
+      })
+    );
+    const base = grids[0]!.grid;
+
+    // 850/700 hPa : isolignes de tourbillon cyclonique (10 a 1000, en unites
+    // x10^-7 s^-1 — cf. grib-vorticity.ts) qui signent la convergence de basse
+    // couche. 200 hPa : isolignes de tourbillon anticyclonique (-1000 a 0) qui
+    // signent la divergence en altitude. Pas espace ~100 unites sur la plage
+    // (pas 2 seuils isoles) pour retrouver le maillage dense de la vraie carte.
+    const range = (lo: number, hi: number, step: number) => {
+      const out: number[] = [];
+      for (let v = lo; v <= hi; v += step) out.push(v);
+      return out;
+    };
+    const layerSpecs: { niveau: string; label: string; color: [number, number, number]; levels: number[] }[] = [
+      { niveau: "850HPA", label: "850 hPa (convergence)", color: [220, 38, 38],  levels: range(50, 950, 80) },
+      { niveau: "700HPA", label: "700 hPa (convergence)", color: [22, 163, 74],  levels: range(50, 950, 80) },
+      { niveau: "200HPA", label: "200 hPa (divergence)",  color: [37, 99, 235],  levels: range(-950, -50, 80) },
+    ];
+    const layers: VorticityLayer[] = layerSpecs.map((spec) => {
+      const found = grids.find((g) => g.niveau === spec.niveau)!;
+      return {
+        label: spec.label,
+        color: spec.color,
+        values: found.values,
+        ni: found.grid.ni,
+        nj: found.grid.nj,
+        levels: spec.levels,
+      };
+    });
+
+    const svg = renderVorticityComboSvg({
+      title: cfg.label,
+      overlayTime: `${rHH}00`,
+      lon0: base.lon0, lon1: base.lon1, lat0: base.lat0, lat1: base.lat1,
+      layers,
+    });
+    fs.writeFileSync(cached, svg, "utf8");
+    return { localPath: cached, cfg, fromCache: false, size: Buffer.byteLength(svg) };
+  }
+
   let grid: GribGrid;
   let scaleKey: keyof typeof SCALES;
 
@@ -503,7 +572,7 @@ async function renderGribToLocalFile(
     ]);
     const values = uGrid.values.map((u, i) => Math.sqrt(u * u + (vGrid.values[i] ?? 0) ** 2));
     grid = { ...uGrid, values };
-    scaleKey = "wind";
+    scaleKey = cfg.scale;
   } else {
     grid = await extractGribGrid(cfg.param, cfg.niveau, echeance, synDate, cfg.combinaison);
     scaleKey = cfg.scale;
@@ -518,6 +587,8 @@ async function renderGribToLocalFile(
     max: scale.max,
     stops: scale.stops as unknown as ColorStop[],
     transform: scale.transform,
+    contours: "contours" in scale ? scale.contours : undefined,
+    overlayTime: `${rHH}00`,
   });
 
   fs.writeFileSync(cached, svg, "utf8");
