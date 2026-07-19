@@ -734,6 +734,9 @@ export const SCALES = {
   },
   precip: {
     min: 0, max: 40,
+    // Stops gardes pour compatibilite (non utilises quand bandColors est
+    // fourni, cf. humidite) — le rendu reel utilise les couleurs de categorie
+    // ci-dessous.
     stops: [
       { at: 0,    color: [255, 255, 255] as [number, number, number] },
       { at: 0.15, color: [199, 233, 192] as [number, number, number] },
@@ -743,6 +746,25 @@ export const SCALES = {
     ],
     transform: (v: number) => v,
     unit: "mm",
+    // Style Synergie : anneaux d'isohyetes (comme des courbes de niveau) sur
+    // fond parchemin, avec un remplissage par categorie qui ne devient
+    // vraiment visible qu'aux seuils eleves (les precipitations sont
+    // spatialement tres localisees — cellules orageuses isolees — contrairement
+    // a la temperature/humidite qui varient en douceur sur de grandes zones ;
+    // un aplat continu "lisse" n'a pas de sens ici, le repere visuel doit etre
+    // les cellules/coeurs de pluie, pas un gradient regional).
+    bandBoundaries: [1, 5, 10, 20, 30],
+    bandColors: [
+      [245, 241, 220], // < 1mm — invisible sur fond parchemin (pas de pluie)
+      [210, 235, 247], // 1-5mm — bleu tres pale
+      [130, 205, 230], // 5-10mm — cyan
+      [60, 170, 90],   // 10-20mm — vert
+      [30, 100, 190],  // 20-30mm — bleu
+      [110, 30, 150],  // > 30mm — violet (coeur de cellule intense)
+    ],
+    contours: {
+      step: 5, decimals: 0, color: "#1e6fa8", withFill: true, background: "cream",
+    },
   },
   wind: {
     min: 0, max: 15,
