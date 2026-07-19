@@ -91,6 +91,7 @@ export interface ContourOptions {
   ridgeTrough?: { ridgeColor: string; troughColor: string }; // axes de dorsale/thalweg (pression uniquement)
   highlightAbove?: { threshold: number; color: string; label: string }; // remplissage plein au-dela d'un seuil (ex: humidite), + legende
   background?: "white" | "cream"; // fond de la zone de tracé (defaut blanc)
+  withFill?: boolean; // garde l'aplat de couleur en fond sous les isolignes (ex: temperature — Synergie superpose aplat chaud/froid + isothermes noirs)
 }
 
 export interface RenderOptions {
@@ -197,15 +198,18 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   const lonSpan = lon1 - lon0 || 1;
   const latSpan = lat1 - lat0 || 1;
 
-  // Champs a isolignes (pression, temperature) : pas d'aplat de couleur, pas
-  // d'axes/graduations — fond blanc et rendu "carte synoptique" epure, comme
-  // le vrai rendu Synergie. Les champs en aplat (humidite/precip/vent) gardent
-  // le style tableau de bord avec axes et legende couleur.
-  const noFill = !!opts.contours;
+  // Champs a isolignes (pression, temperature, humidite) : cartouche titre en
+  // overlay compact, pas d'axes/graduations/villes — rendu "carte synoptique"
+  // epure comme Synergie. Independamment de ca, certains champs a isolignes
+  // gardent aussi l'aplat de couleur en fond (ex: temperature — Synergie
+  // superpose un aplat chaud/froid ET des isothermes noirs par-dessus) via
+  // `ContourOptions.withFill` ; d'autres n'en ont pas (PMER, humidite).
+  const hasIsolines = !!opts.contours;
+  const showFill = !hasIsolines || !!opts.contours?.withFill;
   const bands = opts.bandBoundaries ? deriveBands(opts.stops, opts.min, opts.max, opts.bandBoundaries) : null;
   const plotBackground = opts.contours?.background === "cream" ? "#f5f1dc" : "#ffffff";
 
-  const MARGIN = noFill
+  const MARGIN = hasIsolines
     ? { top: 10, right: 10, bottom: 10, left: 10 }
     : { top: 56, right: 40, bottom: 90, left: 56 };
   const PLOT_W = WIDTH - MARGIN.left - MARGIN.right;
@@ -218,15 +222,23 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   const cellH = (PLOT_H / nj) * STEP;
   const minClosedAreaPx2 = PLOT_W * PLOT_H * MIN_CLOSED_AREA_FRAC;
 
+  // Pour un champ a isolignes + aplat combines (ex: temperature), on lisse le
+  // champ une fois pour toutes et on reutilise ce meme champ lisse pour
+  // l'aplat ET les isolignes — sinon l'aplat en cellules brutes (STEP=2) a
+  // cote d'isolignes lissees donnait un contraste "blocky" agressif.
+  const sharedField: number[] | null = hasIsolines
+    ? smoothField(values.map(v => (v === undefined ? undefined : opts.transform(v))) as number[], ni, nj, 1.5)
+    : null;
+
   const rects: string[] = [];
-  if (!noFill) {
+  if (showFill) {
     for (let row = 0; row < nj; row += STEP) {
       const lat = lat0 + (row / (nj - 1)) * latSpan;
       for (let col = 0; col < ni; col += STEP) {
         const lon = lon0 + (col / (ni - 1)) * lonSpan;
         const raw = values[row * ni + col];
         if (raw === undefined) continue;
-        const value = opts.transform(raw);
+        const value = sharedField ? sharedField[row * ni + col]! : opts.transform(raw);
         const t = (value - opts.min) / (opts.max - opts.min || 1);
         const color = bands ? bandColorAt(value, bands) : colorAt(opts.stops, t);
         const x = xFor(lon);
@@ -300,7 +312,7 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
       return `rgb(${r},${g},${b})`;
     };
     const rawField = values.map(v => (v === undefined ? undefined : opts.transform(v))) as number[];
-    const field = smoothField(rawField, ni, nj, 1.5);
+    const field = sharedField ?? smoothField(rawField, ni, nj, 1.5);
 
     const levelStart = Math.ceil(opts.min / step) * step;
     const levels: number[] = [];
@@ -451,9 +463,10 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
     }
   }
 
-  // Villes de repère — uniquement pour les cartes en aplat de couleur.
+  // Villes de repère — uniquement pour les cartes tableau de bord (pas les
+  // cartes a isolignes, meme celles qui ont un aplat comme la temperature).
   const cityMarkers: string[] = [];
-  if (!noFill) {
+  if (!hasIsolines) {
     for (const city of CITIES) {
       if (city.lon < lon0 || city.lon > lon1 || city.lat < lat0 || city.lat > lat1) continue;
       const x = xFor(city.lon);
@@ -474,14 +487,14 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   for (let lon = Math.ceil(lon0 / lonStep) * lonStep; lon <= lon1; lon += lonStep) {
     const x = xFor(lon);
     gridLines.push(`<line x1="${x.toFixed(1)}" y1="${MARGIN.top}" x2="${x.toFixed(1)}" y2="${MARGIN.top + PLOT_H}" stroke="#d8a0c0" stroke-width="0.3"/>`);
-    if (!noFill) {
+    if (!hasIsolines) {
       gridLines.push(`<text x="${x.toFixed(1)}" y="${MARGIN.top + PLOT_H + 18}" font-size="11" fill="#334155" text-anchor="middle">${lon}°</text>`);
     }
   }
   for (let lat = Math.ceil(lat0 / latStep) * latStep; lat <= lat1; lat += latStep) {
     const y = yFor(lat);
     gridLines.push(`<line x1="${MARGIN.left}" y1="${y.toFixed(1)}" x2="${MARGIN.left + PLOT_W}" y2="${y.toFixed(1)}" stroke="#d8a0c0" stroke-width="0.3"/>`);
-    if (!noFill) {
+    if (!hasIsolines) {
       gridLines.push(`<text x="${MARGIN.left - 8}" y="${(y + 4).toFixed(1)}" font-size="11" fill="#334155" text-anchor="end">${lat}°N</text>`);
     }
   }
@@ -499,7 +512,7 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   const legendH = 18;
   const legendRects: string[] = [];
   const legendLabels: string[] = [];
-  if (!noFill && bands) {
+  if (!hasIsolines && bands) {
     const n = bands.colors.length;
     const bw = legendW / n;
     for (let i = 0; i < n; i++) {
@@ -511,7 +524,7 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
       const x = legendX + (i + 1) * bw;
       legendLabels.push(`<text x="${x.toFixed(1)}" y="${legendY + legendH + 16}" font-size="11" font-weight="600" fill="#1e293b" text-anchor="middle">${bands.boundaries[i]}</text>`);
     }
-  } else if (!noFill) {
+  } else if (!hasIsolines) {
     const legendStops = 40;
     for (let i = 0; i < legendStops; i++) {
       const t0 = i / legendStops;
@@ -527,7 +540,7 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
       legendLabels.push(`<text x="${x.toFixed(1)}" y="${legendY + legendH + 16}" font-size="11" fill="#334155" text-anchor="middle">${val.toFixed(0)}</text>`);
     }
   }
-  const legendBox = !noFill
+  const legendBox = !hasIsolines
     ? `<g>${legendRects.join("")}</g><rect x="${legendX}" y="${legendY}" width="${legendW}" height="${legendH}" fill="none" stroke="#1e293b" stroke-width="1"/><g>${legendLabels.join("")}</g><text x="${legendX + legendW}" y="${legendY - 6}" font-size="11" fill="#334155" text-anchor="end">${escapeXml(opts.unit)}</text>`
     : "";
 
@@ -539,12 +552,58 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   // bord du SVG pour des titres plus longs comme "Humidité 850 hPa".
   const titleBoxW = Math.max(60, opts.title.length * 9.2 + 20, (opts.overlayTime ?? "").length * 8.5 + 20);
   const titleCenterX = MARGIN.left + 4 + titleBoxW / 2;
-  const header = !noFill
+  const header = !hasIsolines
     ? `<text x="${MARGIN.left}" y="26" font-size="18" font-weight="600" fill="#0f172a">${escapeXml(opts.title)}</text>
   <text x="${MARGIN.left}" y="44" font-size="12" fill="#64748b">${escapeXml(opts.subtitle)}</text>`
     : `<rect x="${MARGIN.left + 4}" y="${MARGIN.top + 4}" width="${titleBoxW.toFixed(0)}" height="46" fill="#ffffff" fill-opacity="0.82" stroke="#000000" stroke-width="0.6"/>
   <text x="${titleCenterX.toFixed(1)}" y="${MARGIN.top + 22}" font-size="17" font-weight="700" fill="#000000" text-anchor="middle" font-family="Arial, sans-serif">${escapeXml(opts.title)}</text>
   <text x="${titleCenterX.toFixed(1)}" y="${MARGIN.top + 41}" font-size="15" font-weight="700" fill="#000000" text-anchor="middle" font-family="Arial, sans-serif">${escapeXml(opts.overlayTime ?? "")}</text>`;
+
+  // Legende compacte pour les champs a isolignes qui gardent un aplat de
+  // couleur en fond (ex: temperature) — en bas a gauche de la carte elle-meme
+  // (pas de bandeau externe, la marge est trop etroite pour ca) : une bande
+  // degradee courte + 3 valeurs reperes. Manquait completement avant — signale
+  // explicitement par l'utilisateur ("pas de legende").
+  let fillLegend = "";
+  if (hasIsolines && showFill) {
+    const flX = MARGIN.left + 8;
+    const flY = MARGIN.top + PLOT_H - 34;
+    const flW = 160;
+    const flH = 12;
+    const flRects: string[] = [];
+    const flLabels: string[] = [];
+    if (bands) {
+      // Bandes discretes : un rectangle par palier + les seuils ecrits aux
+      // frontieres entre blocs, meme logique que la legende NOAA/GFS.
+      const n = bands.colors.length;
+      const bw = flW / n;
+      for (let i = 0; i < n; i++) {
+        const [r, g, b] = bands.colors[i]!;
+        const x = flX + i * bw;
+        flRects.push(`<rect x="${x.toFixed(1)}" y="${flY.toFixed(1)}" width="${(bw + 0.5).toFixed(1)}" height="${flH}" fill="rgb(${r},${g},${b})" stroke="#94a3b8" stroke-width="0.3"/>`);
+      }
+      for (let i = 0; i < bands.boundaries.length; i++) {
+        const x = flX + (i + 1) * bw;
+        flLabels.push(`<text x="${x.toFixed(1)}" y="${(flY + flH + 12).toFixed(1)}" font-size="7.5" font-weight="600" fill="#111111" text-anchor="middle">${bands.boundaries[i]}</text>`);
+      }
+    } else {
+      const flSteps = 24;
+      for (let i = 0; i < flSteps; i++) {
+        const t0 = i / flSteps;
+        const x = flX + t0 * flW;
+        const w = flW / flSteps;
+        flRects.push(`<rect x="${x.toFixed(1)}" y="${flY.toFixed(1)}" width="${(w + 0.5).toFixed(1)}" height="${flH}" fill="${colorAt(opts.stops, t0)}"/>`);
+      }
+      for (const t of [0, 0.5, 1]) {
+        const val = opts.min + t * (opts.max - opts.min);
+        const x = flX + t * flW;
+        const anchor = t === 0 ? "start" : t === 1 ? "end" : "middle";
+        flLabels.push(`<text x="${x.toFixed(1)}" y="${(flY + flH + 13).toFixed(1)}" font-size="9.5" font-weight="600" fill="#111111" text-anchor="${anchor}">${val.toFixed(0)}${escapeXml(opts.unit)}</text>`);
+      }
+    }
+    fillLegend = `<rect x="${(flX - 6).toFixed(1)}" y="${(flY - 6).toFixed(1)}" width="${flW + 12}" height="${flH + 26}" fill="#ffffff" fill-opacity="0.82" stroke="#000000" stroke-width="0.6"/>` +
+      `<g>${flRects.join("")}</g><rect x="${flX.toFixed(1)}" y="${flY.toFixed(1)}" width="${flW}" height="${flH}" fill="none" stroke="#000000" stroke-width="0.6"/>${flLabels.join("")}`;
+  }
 
   return `<svg viewBox="0 0 ${WIDTH} ${HEIGHT}" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif">
   <defs>
@@ -567,6 +626,7 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   <rect x="${MARGIN.left}" y="${MARGIN.top}" width="${PLOT_W}" height="${PLOT_H}" fill="none" stroke="#000000" stroke-width="1"/>
   ${header}
   ${contourLegend}
+  ${fillLegend}
   ${legendBox}
 </svg>`;
 }
@@ -594,16 +654,38 @@ export const SCALES = {
   },
   temp: {
     min: 15, max: 42,
+    // Degrade chaud sequentiel a fort contraste (ColorBrewer YlOrRd) — pas de
+    // bleu (ce domaine n'est jamais "froid"), mais surtout une plage de
+    // luminosite/saturation large : le premier essai (jaune pale -> orange
+    // pale) restait visuellement quasi plat sur toute la plage 15-42°C, un
+    // ecart de temperature ne se voyait pas. Ici le jaune tres clair (froid
+    // pour ce domaine) contraste fortement avec le rouge sombre (chaud), donc
+    // le moindre ecart de quelques degres se voit — important pour reperer
+    // des chutes/hausses (indicateur d'activite orageuse).
     stops: [
-      { at: 0,    color: [49, 54, 149] as [number, number, number] },
-      { at: 0.25, color: [69, 117, 180] as [number, number, number] },
-      { at: 0.5,  color: [255, 255, 191] as [number, number, number] },
-      { at: 0.75, color: [253, 141, 60] as [number, number, number] },
-      { at: 1,    color: [165, 0, 38] as [number, number, number] },
+      { at: 0,    color: [255, 255, 204] as [number, number, number] },
+      { at: 0.25, color: [254, 217, 118] as [number, number, number] },
+      { at: 0.5,  color: [253, 141, 60]  as [number, number, number] },
+      { at: 0.75, color: [227, 26, 28]   as [number, number, number] },
+      { at: 1,    color: [128, 0, 38]    as [number, number, number] },
     ],
     transform: (k: number) => k - 273.15,
     unit: "°C",
-    contours: { step: 2, decimals: 0, color: "#e65c00" },
+    // Bandes discretes tous les 2°C (alignees exactement sur les isothermes,
+    // meme pas), pas un degrade continu : les tables de couleur temperature
+    // operationnelles (NCL/GEMPAK "temp_19lev", etc.) utilisent toutes des
+    // paliers francs — une teinte nettement differente d'un palier a l'autre —
+    // justement pour qu'un ecart de quelques degres change de couleur de facon
+    // evidente, ce qu'un degrade lisse ne permet pas (deux teintes voisines se
+    // ressemblent toujours un peu, meme avec un fort contraste global).
+    bandBoundaries: [16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40],
+    // Style Synergie "Temp 2M" : aplat couleur chaud/froid EN PLUS des
+    // isothermes (withFill), pas des isolignes seules sur fond blanc — l'aplat
+    // donne le repère rapide, les isothermes en noir la valeur précise. Noir
+    // plutôt qu'une teinte du dégradé : contraste garanti sur n'importe quelle
+    // couleur de fond, contrairement à l'orange unique d'avant qui devenait
+    // illisible sur les zones déjà orange.
+    contours: { step: 2, decimals: 0, color: "#1a1a1a", withFill: true },
   },
   humidity: {
     min: 0, max: 100,
