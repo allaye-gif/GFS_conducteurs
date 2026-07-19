@@ -88,8 +88,10 @@ export function renderVorticityComboSvg(opts: VorticityComboOptions): string {
     gridLines.push(`<line x1="${MARGIN.left}" y1="${y.toFixed(1)}" x2="${MARGIN.left + PLOT_W}" y2="${y.toFixed(1)}" stroke="#d8a0c0" stroke-width="0.3"/>`);
   }
 
-  // Legende : un trait de couleur + libelle par niveau, empile en haut a droite.
-  const legendX = MARGIN.left + PLOT_W - 150;
+  // Legende : un trait de couleur + libelle (avec plage de valeurs) par
+  // niveau, empile en haut a droite — les seuils numeriques rendent la
+  // legende exploitable sans deviner ce que chaque couleur veut dire.
+  const legendX = MARGIN.left + PLOT_W - 205;
   const legendYStart = MARGIN.top + 8;
   const legendItems = layers.map((layer, i) => {
     const y = legendYStart + i * 18;
@@ -98,7 +100,7 @@ export function renderVorticityComboSvg(opts: VorticityComboOptions): string {
       `<text x="${legendX + 21}" y="${y + 10}" font-size="10.5" font-weight="600" fill="#111111" font-family="Arial, sans-serif">${escapeXml(layer.label)}</text>`;
   }).join("");
   const legendBoxH = layers.length * 18 + 6;
-  const legendBg = `<rect x="${legendX - 6}" y="${legendYStart - 6}" width="148" height="${legendBoxH}" fill="#ffffff" fill-opacity="0.85" stroke="#000000" stroke-width="0.6"/>`;
+  const legendBg = `<rect x="${legendX - 6}" y="${legendYStart - 6}" width="203" height="${legendBoxH}" fill="#ffffff" fill-opacity="0.85" stroke="#000000" stroke-width="0.6"/>`;
 
   const header = `<rect x="${MARGIN.left + 4}" y="${MARGIN.top + 4}" width="86" height="46" fill="#ffffff" fill-opacity="0.85" stroke="#000000" stroke-width="0.6"/>
   <text x="${MARGIN.left + 47}" y="${MARGIN.top + 22}" font-size="17" font-weight="700" fill="#000000" text-anchor="middle" font-family="Arial, sans-serif">${escapeXml(opts.title)}</text>

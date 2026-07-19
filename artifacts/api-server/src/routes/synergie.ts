@@ -536,9 +536,9 @@ async function renderGribToLocalFile(
       return out;
     };
     const layerSpecs: { niveau: string; label: string; color: [number, number, number]; levels: number[] }[] = [
-      { niveau: "850HPA", label: "850 hPa (convergence)", color: [220, 38, 38],  levels: range(50, 950, 80) },
-      { niveau: "700HPA", label: "700 hPa (convergence)", color: [22, 163, 74],  levels: range(50, 950, 80) },
-      { niveau: "200HPA", label: "200 hPa (divergence)",  color: [37, 99, 235],  levels: range(-950, -50, 80) },
+      { niveau: "850HPA", label: "850 hPa conv. (10 à 1000)",  color: [220, 38, 38],  levels: range(50, 950, 80) },
+      { niveau: "700HPA", label: "700 hPa conv. (10 à 1000)",  color: [22, 163, 74],  levels: range(50, 950, 80) },
+      { niveau: "200HPA", label: "200 hPa div. (-1000 à 0)",   color: [37, 99, 235],  levels: range(-950, -50, 80) },
     ];
     const layers: VorticityLayer[] = layerSpecs.map((spec) => {
       const found = grids.find((g) => g.niveau === spec.niveau)!;
@@ -593,6 +593,7 @@ async function renderGribToLocalFile(
     stops: scale.stops as unknown as ColorStop[],
     transform: scale.transform,
     contours: "contours" in scale ? scale.contours : undefined,
+    bandBoundaries: "bandBoundaries" in scale ? (scale.bandBoundaries as unknown as number[]) : undefined,
     overlayTime: `${rHH}00`,
     windBarbs,
   });

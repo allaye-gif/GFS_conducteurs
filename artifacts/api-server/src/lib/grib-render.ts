@@ -28,7 +28,7 @@ function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
-function colorAt(stops: ColorStop[], t: number): string {
+function colorTupleAt(stops: ColorStop[], t: number): [number, number, number] {
   const clamped = Math.max(0, Math.min(1, t));
   let lo = stops[0]!;
   let hi = stops[stops.length - 1]!;
@@ -41,18 +41,56 @@ function colorAt(stops: ColorStop[], t: number): string {
   }
   const span = hi.at - lo.at || 1;
   const localT = (clamped - lo.at) / span;
-  const r = Math.round(lerp(lo.color[0], hi.color[0], localT));
-  const g = Math.round(lerp(lo.color[1], hi.color[1], localT));
-  const b = Math.round(lerp(lo.color[2], hi.color[2], localT));
+  return [
+    Math.round(lerp(lo.color[0], hi.color[0], localT)),
+    Math.round(lerp(lo.color[1], hi.color[1], localT)),
+    Math.round(lerp(lo.color[2], hi.color[2], localT)),
+  ];
+}
+
+function colorAt(stops: ColorStop[], t: number): string {
+  const [r, g, b] = colorTupleAt(stops, t);
+  return `rgb(${r},${g},${b})`;
+}
+
+// Echelle a bandes discretes (comme une legende NOAA/GFS classique : des blocs
+// de couleur pleine entre des seuils ronds, pas un degrade continu ou on ne
+// peut pas lire une valeur exacte). Les couleurs de chaque bande sont deduites
+// du degrade continu existant (au milieu de chaque bande) pour rester dans la
+// meme identite visuelle par champ, sans avoir a choisir une nouvelle palette
+// a la main.
+export interface BandScale {
+  boundaries: number[]; // seuils ronds, ex: [20,35,50,65,80,95]
+  colors: [number, number, number][]; // boundaries.length + 1 couleurs
+}
+
+function deriveBands(stops: ColorStop[], min: number, max: number, boundaries: number[]): BandScale {
+  const edges = [min, ...boundaries, max];
+  const colors: [number, number, number][] = [];
+  for (let i = 0; i < edges.length - 1; i++) {
+    const mid = (edges[i]! + edges[i + 1]!) / 2;
+    const t = (mid - min) / (max - min || 1);
+    colors.push(colorTupleAt(stops, t));
+  }
+  return { boundaries, colors };
+}
+
+function bandColorAt(value: number, band: BandScale): string {
+  let idx = 0;
+  while (idx < band.boundaries.length && value >= band.boundaries[idx]!) idx++;
+  const [r, g, b] = band.colors[idx] ?? band.colors[band.colors.length - 1]!;
   return `rgb(${r},${g},${b})`;
 }
 
 export interface ContourOptions {
   step: number; // ecart entre isolignes, dans l'unite affichee (apres transform)
   decimals?: number; // decimales pour les etiquettes de valeur
-  color: string;
+  color: string; // couleur fixe des isolignes (ignoree si gradientColor est actif)
+  gradientColor?: boolean; // chaque isoligne prend la couleur du degrade (opts.stops) a sa propre valeur, au lieu d'une couleur unique pour toutes
   extrema?: { highLabel: string; lowLabel: string; color: string }; // centres H/D (pression uniquement)
   ridgeTrough?: { ridgeColor: string; troughColor: string }; // axes de dorsale/thalweg (pression uniquement)
+  highlightAbove?: { threshold: number; color: string; label: string }; // remplissage plein au-dela d'un seuil (ex: humidite), + legende
+  background?: "white" | "cream"; // fond de la zone de tracé (defaut blanc)
 }
 
 export interface RenderOptions {
@@ -67,6 +105,7 @@ export interface RenderOptions {
   contours?: ContourOptions;
   overlayTime?: string; // ex: "0600" — affiche en overlay sous le titre pour les cartes a isolignes
   windBarbs?: { u: number[]; v: number[] }; // memes dimensions/emprise que la grille principale
+  bandBoundaries?: number[]; // active une legende/aplat a bandes discretes plutot qu'un degrade continu
 }
 
 // Ratio 4:3 fixe.
@@ -163,6 +202,8 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   // le vrai rendu Synergie. Les champs en aplat (humidite/precip/vent) gardent
   // le style tableau de bord avec axes et legende couleur.
   const noFill = !!opts.contours;
+  const bands = opts.bandBoundaries ? deriveBands(opts.stops, opts.min, opts.max, opts.bandBoundaries) : null;
+  const plotBackground = opts.contours?.background === "cream" ? "#f5f1dc" : "#ffffff";
 
   const MARGIN = noFill
     ? { top: 10, right: 10, bottom: 10, left: 10 }
@@ -187,7 +228,7 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
         if (raw === undefined) continue;
         const value = opts.transform(raw);
         const t = (value - opts.min) / (opts.max - opts.min || 1);
-        const color = colorAt(opts.stops, t);
+        const color = bands ? bandColorAt(value, bands) : colorAt(opts.stops, t);
         const x = xFor(lon);
         const y = yFor(lat) - cellH; // le rect couvre vers le nord depuis ce point
         rects.push(`<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(cellW + 0.6).toFixed(1)}" height="${(cellH + 0.6).toFixed(1)}" fill="${color}"/>`);
@@ -248,14 +289,49 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   const extremaMarkers: string[] = [];
   const ridgeTroughPaths: string[] = [];
   const ridgeTroughLabels: string[] = [];
+  const highlightRects: string[] = [];
+  let contourLegend = "";
   if (opts.contours) {
-    const { step, color, decimals = 0, extrema } = opts.contours;
+    const { step, color, decimals = 0, extrema, highlightAbove, gradientColor } = opts.contours;
+    const colorForLevel = (level: number): string => {
+      if (!gradientColor) return color;
+      const t = (level - opts.min) / (opts.max - opts.min || 1);
+      const [r, g, b] = colorTupleAt(opts.stops, t);
+      return `rgb(${r},${g},${b})`;
+    };
     const rawField = values.map(v => (v === undefined ? undefined : opts.transform(v))) as number[];
     const field = smoothField(rawField, ni, nj, 1.5);
 
     const levelStart = Math.ceil(opts.min / step) * step;
     const levels: number[] = [];
     for (let lvl = levelStart; lvl <= opts.max; lvl += step) levels.push(lvl);
+
+    // Remplissage plein au-dela d'un seuil (ex: humidite >= 70%), a pleine
+    // resolution (pas le sous-echantillonnage STEP de l'aplat degrade) — cf.
+    // capture Synergie Hum850 : seule la classe la plus extreme est remplie en
+    // plein, tout le reste n'est que des isolignes sur fond uni. Accompagne
+    // d'une legende explicite (pastille + texte) — l'absence de legende sur
+    // ce genre de remplissage etait le point signale par l'utilisateur.
+    if (highlightAbove) {
+      const fineCellW = PLOT_W / ni;
+      const fineCellH = PLOT_H / nj;
+      for (let row = 0; row < nj; row++) {
+        const lat = lat0 + (row / (nj - 1)) * latSpan;
+        for (let col = 0; col < ni; col++) {
+          const v = field[row * ni + col];
+          if (v === undefined || v < highlightAbove.threshold) continue;
+          const lon = lon0 + (col / (ni - 1)) * lonSpan;
+          const x = xFor(lon);
+          const y = yFor(lat) - fineCellH;
+          highlightRects.push(`<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(fineCellW + 0.6).toFixed(1)}" height="${(fineCellH + 0.6).toFixed(1)}" fill="${highlightAbove.color}" clip-path="url(#plotClip)"/>`);
+        }
+      }
+      const legendY2 = MARGIN.top + 62;
+      contourLegend = `<rect x="${MARGIN.left + 4}" y="${MARGIN.top + 54}" width="176" height="40" fill="#ffffff" fill-opacity="0.85" stroke="#000000" stroke-width="0.6"/>` +
+        `<rect x="${MARGIN.left + 12}" y="${legendY2}" width="14" height="14" fill="${highlightAbove.color}" stroke="#000000" stroke-width="0.5"/>` +
+        `<text x="${MARGIN.left + 32}" y="${legendY2 + 11}" font-size="10" font-weight="600" fill="#111111" font-family="Arial, sans-serif">${escapeXml(highlightAbove.label)}</text>` +
+        `<text x="${MARGIN.left + 12}" y="${legendY2 + 27}" font-size="9.5" fill="#334155" font-family="Arial, sans-serif">Isolignes tous les ${step}${escapeXml(opts.unit)}</text>`;
+    }
 
     const traced = traceContours(field, ni, nj, lon0, lon1, lat0, lat1, levels);
 
@@ -266,12 +342,17 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
       const isClosed = Math.hypot(px[0]![0] - px[px.length - 1]![0], px[0]![1] - px[px.length - 1]![1]) < 0.6;
       if (isClosed && polygonAreaPx(px) < minClosedAreaPx2) continue; // confetti — on ignore entierement
 
-      const isMajor = Math.abs(((path.level % 4) + 4) % 4) < 1e-6;
+      // Alterne epais/fin toutes les 2 isolignes (pas modulo sur la valeur
+      // absolue, qui ne donne une hierarchie sensee que si le pas est 2 —
+      // generalise a n'importe quel pas de contour).
+      const stepIndex = Math.round((path.level - levelStart) / step);
+      const isMajor = stepIndex % 2 === 0;
       const strokeWidth = isMajor ? 2 : 0.8;
       const dashAttr = isMajor ? "" : ` stroke-dasharray="1,2.5"`;
+      const lineColor = colorForLevel(path.level);
 
       const d = px.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-      contourPaths.push(`<path d="${d}" fill="none" stroke="${color}" stroke-width="${strokeWidth}"${dashAttr} stroke-linejoin="round" stroke-linecap="round" clip-path="url(#plotClip)"/>`);
+      contourPaths.push(`<path d="${d}" fill="none" stroke="${lineColor}" stroke-width="${strokeWidth}"${dashAttr} stroke-linejoin="round" stroke-linecap="round" clip-path="url(#plotClip)"/>`);
 
       let totalLen = 0;
       for (let i = 1; i < px.length; i++) totalLen += Math.hypot(px[i]![0] - px[i - 1]![0], px[i]![1] - px[i - 1]![1]);
@@ -301,7 +382,7 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
       const labelW = 8 + labelText.length * 6.2;
       contourLabels.push(
         `<rect x="${(x - labelW / 2).toFixed(1)}" y="${(y - 7).toFixed(1)}" width="${labelW.toFixed(1)}" height="13" fill="#ffffff" fill-opacity="0.78" clip-path="url(#plotClip)"/>` +
-        `<text x="${x.toFixed(1)}" y="${(y + 3.5).toFixed(1)}" font-size="9.5" font-weight="700" font-family="Arial, Helvetica, sans-serif" fill="#111111" text-anchor="middle" clip-path="url(#plotClip)">${labelText}</text>`
+        `<text x="${x.toFixed(1)}" y="${(y + 3.5).toFixed(1)}" font-size="9.5" font-weight="700" font-family="Arial, Helvetica, sans-serif" fill="${lineColor}" text-anchor="middle" clip-path="url(#plotClip)">${labelText}</text>`
       );
     }
 
@@ -405,17 +486,33 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
     }
   }
 
-  // Legende (barre de couleur horizontale) — uniquement pour les champs en
-  // aplat de couleur ; les champs a isolignes n'en ont pas (les valeurs sont
-  // deja portees par les etiquettes sur les lignes, comme sur Synergie).
+  // Legende — uniquement pour les champs en aplat de couleur ; les champs a
+  // isolignes n'en ont pas (les valeurs sont deja portees par les etiquettes
+  // sur les lignes, comme sur Synergie). Deux styles :
+  // - a bandes discretes (comme une legende NOAA/GFS) quand `bandBoundaries`
+  //   est fourni : des blocs de couleur pleine avec les seuils ecrits entre
+  //   chaque bloc — on peut lire une valeur exacte, contrairement a un degrade.
+  // - degrade continu classique sinon (fallback).
   const legendX = MARGIN.left;
   const legendY = HEIGHT - 42;
   const legendW = PLOT_W;
-  const legendH = 16;
-  const legendStops = 40;
+  const legendH = 18;
   const legendRects: string[] = [];
   const legendLabels: string[] = [];
-  if (!noFill) {
+  if (!noFill && bands) {
+    const n = bands.colors.length;
+    const bw = legendW / n;
+    for (let i = 0; i < n; i++) {
+      const [r, g, b] = bands.colors[i]!;
+      const x = legendX + i * bw;
+      legendRects.push(`<rect x="${x.toFixed(1)}" y="${legendY}" width="${(bw + 0.5).toFixed(1)}" height="${legendH}" fill="rgb(${r},${g},${b})" stroke="#94a3b8" stroke-width="0.5"/>`);
+    }
+    for (let i = 0; i < bands.boundaries.length; i++) {
+      const x = legendX + (i + 1) * bw;
+      legendLabels.push(`<text x="${x.toFixed(1)}" y="${legendY + legendH + 16}" font-size="11" font-weight="600" fill="#1e293b" text-anchor="middle">${bands.boundaries[i]}</text>`);
+    }
+  } else if (!noFill) {
+    const legendStops = 40;
     for (let i = 0; i < legendStops; i++) {
       const t0 = i / legendStops;
       const x = legendX + t0 * legendW;
@@ -437,21 +534,27 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   // Titre — bandeau externe discret pour les cartes en aplat (avec metadonnees
   // completes) ; encart overlay en haut a gauche de la carte pour les cartes a
   // isolignes, comme sur une vraie capture Synergie ("Pmer" + heure du reseau).
+  // La largeur de l'encart s'adapte a la longueur du titre — une largeur fixe
+  // (pensee pour "Pmer"/"TA") debordait et se faisait tronquer a gauche par le
+  // bord du SVG pour des titres plus longs comme "Humidité 850 hPa".
+  const titleBoxW = Math.max(60, opts.title.length * 9.2 + 20, (opts.overlayTime ?? "").length * 8.5 + 20);
+  const titleCenterX = MARGIN.left + 4 + titleBoxW / 2;
   const header = !noFill
     ? `<text x="${MARGIN.left}" y="26" font-size="18" font-weight="600" fill="#0f172a">${escapeXml(opts.title)}</text>
   <text x="${MARGIN.left}" y="44" font-size="12" fill="#64748b">${escapeXml(opts.subtitle)}</text>`
-    : `<rect x="${MARGIN.left + 4}" y="${MARGIN.top + 4}" width="86" height="46" fill="#ffffff" fill-opacity="0.82" stroke="#000000" stroke-width="0.6"/>
-  <text x="${MARGIN.left + 47}" y="${MARGIN.top + 22}" font-size="17" font-weight="700" fill="#000000" text-anchor="middle" font-family="Arial, sans-serif">${escapeXml(opts.title)}</text>
-  <text x="${MARGIN.left + 47}" y="${MARGIN.top + 41}" font-size="15" font-weight="700" fill="#000000" text-anchor="middle" font-family="Arial, sans-serif">${escapeXml(opts.overlayTime ?? "")}</text>`;
+    : `<rect x="${MARGIN.left + 4}" y="${MARGIN.top + 4}" width="${titleBoxW.toFixed(0)}" height="46" fill="#ffffff" fill-opacity="0.82" stroke="#000000" stroke-width="0.6"/>
+  <text x="${titleCenterX.toFixed(1)}" y="${MARGIN.top + 22}" font-size="17" font-weight="700" fill="#000000" text-anchor="middle" font-family="Arial, sans-serif">${escapeXml(opts.title)}</text>
+  <text x="${titleCenterX.toFixed(1)}" y="${MARGIN.top + 41}" font-size="15" font-weight="700" fill="#000000" text-anchor="middle" font-family="Arial, sans-serif">${escapeXml(opts.overlayTime ?? "")}</text>`;
 
   return `<svg viewBox="0 0 ${WIDTH} ${HEIGHT}" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, sans-serif">
   <defs>
     <clipPath id="plotClip"><rect x="${MARGIN.left}" y="${MARGIN.top}" width="${PLOT_W}" height="${PLOT_H}"/></clipPath>
   </defs>
   <rect x="0" y="0" width="${WIDTH}" height="${HEIGHT}" fill="#ffffff"/>
-  <rect x="${MARGIN.left}" y="${MARGIN.top}" width="${PLOT_W}" height="${PLOT_H}" fill="#ffffff"/>
+  <rect x="${MARGIN.left}" y="${MARGIN.top}" width="${PLOT_W}" height="${PLOT_H}" fill="${plotBackground}"/>
   <g>${rects.join("")}</g>
   <g>${gridLines.join("")}</g>
+  <g>${highlightRects.join("")}</g>
   <g>${borderPaths.join("")}</g>
   <g>${coastPaths.join("")}</g>
   <g>${contourPaths.join("")}</g>
@@ -463,6 +566,7 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   <g clip-path="url(#plotClip)">${windBarbMarkers.join("")}</g>
   <rect x="${MARGIN.left}" y="${MARGIN.top}" width="${PLOT_W}" height="${PLOT_H}" fill="none" stroke="#000000" stroke-width="1"/>
   ${header}
+  ${contourLegend}
   ${legendBox}
 </svg>`;
 }
@@ -503,13 +607,25 @@ export const SCALES = {
   },
   humidity: {
     min: 0, max: 100,
+    // Degrade rose : plus c'est humide, plus le rose est fonce, jusqu'au
+    // magenta Synergie exact (#c026a3) a saturation — pas une autre teinte.
     stops: [
-      { at: 0,   color: [166, 97, 26] as [number, number, number] },
-      { at: 0.5, color: [247, 247, 247] as [number, number, number] },
-      { at: 1,   color: [1, 133, 113] as [number, number, number] },
+      { at: 0,   color: [253, 242, 248] as [number, number, number] },
+      { at: 0.5, color: [224, 100, 190] as [number, number, number] },
+      { at: 1,   color: [192, 38, 163] as [number, number, number] },
     ],
     transform: (v: number) => v,
     unit: "%",
+    // Isohumes sur fond parchemin (style Synergie "Hum850"), chaque ligne
+    // prend la couleur du degrade a sa propre valeur (gradientColor) — plus
+    // sature, plus fonce, jusqu'au magenta Synergie (#c026a3) au maximum.
+    // Remplissage plein au-dela de 95% dans ce meme magenta ; legende explicite
+    // sur le rendu.
+    contours: {
+      step: 10, decimals: 0, color: "#c026a3", gradientColor: true,
+      highlightAbove: { threshold: 95, color: "#c026a3", label: "Zone saturée (≥ 95%)" },
+      background: "cream",
+    },
   },
   precip: {
     min: 0, max: 40,
