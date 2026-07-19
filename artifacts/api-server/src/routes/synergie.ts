@@ -594,6 +594,7 @@ async function renderGribToLocalFile(
     transform: scale.transform,
     contours: "contours" in scale ? scale.contours : undefined,
     bandBoundaries: "bandBoundaries" in scale ? (scale.bandBoundaries as unknown as number[]) : undefined,
+    bandColors: "bandColors" in scale ? (scale.bandColors as unknown as [number, number, number][]) : undefined,
     overlayTime: `${rHH}00`,
     windBarbs,
   });

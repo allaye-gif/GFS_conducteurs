@@ -92,6 +92,8 @@ export interface ContourOptions {
   highlightAbove?: { threshold: number; color: string; label: string }; // remplissage plein au-dela d'un seuil (ex: humidite), + legende
   background?: "white" | "cream"; // fond de la zone de tracé (defaut blanc)
   withFill?: boolean; // garde l'aplat de couleur en fond sous les isolignes (ex: temperature — Synergie superpose aplat chaud/froid + isothermes noirs)
+  plainTitle?: boolean; // titre pose directement sur le fond, sans cartouche blanc ni bordure (ex: humidite)
+  hideLines?: boolean; // ne trace pas les isolignes/etiquettes — le remplissage en categories nettes porte deja l'info (ex: humidite)
 }
 
 export interface RenderOptions {
@@ -107,6 +109,7 @@ export interface RenderOptions {
   overlayTime?: string; // ex: "0600" — affiche en overlay sous le titre pour les cartes a isolignes
   windBarbs?: { u: number[]; v: number[] }; // memes dimensions/emprise que la grille principale
   bandBoundaries?: number[]; // active une legende/aplat a bandes discretes plutot qu'un degrade continu
+  bandColors?: [number, number, number][]; // couleurs de bande choisies a la main (boundaries.length + 1) — remplace la derivation automatique depuis `stops`, pour des categories nettement tranchees (ex: sec/modere/humide/sature) plutot qu'un degrade discretise
 }
 
 // Ratio 4:3 fixe.
@@ -206,7 +209,9 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   // `ContourOptions.withFill` ; d'autres n'en ont pas (PMER, humidite).
   const hasIsolines = !!opts.contours;
   const showFill = !hasIsolines || !!opts.contours?.withFill;
-  const bands = opts.bandBoundaries ? deriveBands(opts.stops, opts.min, opts.max, opts.bandBoundaries) : null;
+  const bands = opts.bandBoundaries
+    ? (opts.bandColors ? { boundaries: opts.bandBoundaries, colors: opts.bandColors } : deriveBands(opts.stops, opts.min, opts.max, opts.bandBoundaries))
+    : null;
   const plotBackground = opts.contours?.background === "cream" ? "#f5f1dc" : "#ffffff";
 
   const MARGIN = hasIsolines
@@ -338,14 +343,17 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
           highlightRects.push(`<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(fineCellW + 0.6).toFixed(1)}" height="${(fineCellH + 0.6).toFixed(1)}" fill="${highlightAbove.color}" clip-path="url(#plotClip)"/>`);
         }
       }
-      const legendY2 = MARGIN.top + 62;
-      contourLegend = `<rect x="${MARGIN.left + 4}" y="${MARGIN.top + 54}" width="176" height="40" fill="#ffffff" fill-opacity="0.85" stroke="#000000" stroke-width="0.6"/>` +
+      // Le cartouche titre "plainTitle" (sans boite) prend moins de place
+      // verticalement qu'un cartouche encadre — remonter la legende d'autant.
+      const legendTopOffset = opts.contours.plainTitle ? 46 : 54;
+      const legendY2 = MARGIN.top + legendTopOffset + 8;
+      contourLegend = `<rect x="${MARGIN.left + 4}" y="${(MARGIN.top + legendTopOffset).toFixed(1)}" width="176" height="40" fill="#ffffff" fill-opacity="0.85" stroke="#000000" stroke-width="0.6"/>` +
         `<rect x="${MARGIN.left + 12}" y="${legendY2}" width="14" height="14" fill="${highlightAbove.color}" stroke="#000000" stroke-width="0.5"/>` +
         `<text x="${MARGIN.left + 32}" y="${legendY2 + 11}" font-size="10" font-weight="600" fill="#111111" font-family="Arial, sans-serif">${escapeXml(highlightAbove.label)}</text>` +
         `<text x="${MARGIN.left + 12}" y="${legendY2 + 27}" font-size="9.5" fill="#334155" font-family="Arial, sans-serif">Isolignes tous les ${step}${escapeXml(opts.unit)}</text>`;
     }
 
-    const traced = traceContours(field, ni, nj, lon0, lon1, lat0, lat1, levels);
+    const traced = opts.contours.hideLines ? [] : traceContours(field, ni, nj, lon0, lon1, lat0, lat1, levels);
 
     for (const path of traced) {
       if (path.points.length < 2) continue;
@@ -552,9 +560,13 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   // bord du SVG pour des titres plus longs comme "Humidité 850 hPa".
   const titleBoxW = Math.max(60, opts.title.length * 9.2 + 20, (opts.overlayTime ?? "").length * 8.5 + 20);
   const titleCenterX = MARGIN.left + 4 + titleBoxW / 2;
+  const plainTitle = !!opts.contours?.plainTitle;
   const header = !hasIsolines
     ? `<text x="${MARGIN.left}" y="26" font-size="18" font-weight="600" fill="#0f172a">${escapeXml(opts.title)}</text>
   <text x="${MARGIN.left}" y="44" font-size="12" fill="#64748b">${escapeXml(opts.subtitle)}</text>`
+    : plainTitle
+    ? `<text x="${MARGIN.left + 6}" y="${MARGIN.top + 22}" font-size="17" font-weight="700" fill="#000000" font-family="Arial, sans-serif">${escapeXml(opts.title)}</text>
+  <text x="${MARGIN.left + 6}" y="${MARGIN.top + 41}" font-size="15" font-weight="700" fill="#000000" font-family="Arial, sans-serif">${escapeXml(opts.overlayTime ?? "")}</text>`
     : `<rect x="${MARGIN.left + 4}" y="${MARGIN.top + 4}" width="${titleBoxW.toFixed(0)}" height="46" fill="#ffffff" fill-opacity="0.82" stroke="#000000" stroke-width="0.6"/>
   <text x="${titleCenterX.toFixed(1)}" y="${MARGIN.top + 22}" font-size="17" font-weight="700" fill="#000000" text-anchor="middle" font-family="Arial, sans-serif">${escapeXml(opts.title)}</text>
   <text x="${titleCenterX.toFixed(1)}" y="${MARGIN.top + 41}" font-size="15" font-weight="700" fill="#000000" text-anchor="middle" font-family="Arial, sans-serif">${escapeXml(opts.overlayTime ?? "")}</text>`;
@@ -689,24 +701,35 @@ export const SCALES = {
   },
   humidity: {
     min: 0, max: 100,
-    // Degrade rose : plus c'est humide, plus le rose est fonce, jusqu'au
-    // magenta Synergie exact (#c026a3) a saturation — pas une autre teinte.
+    // Stops gardes pour compatibilite (utilises seulement si bandColors est
+    // absent) — le rendu reel utilise les 4 couleurs de categorie ci-dessous.
     stops: [
       { at: 0,   color: [253, 242, 248] as [number, number, number] },
-      { at: 0.5, color: [224, 100, 190] as [number, number, number] },
-      { at: 1,   color: [192, 38, 163] as [number, number, number] },
+      { at: 0.5, color: [230, 60, 170]  as [number, number, number] },
+      { at: 1,   color: [120, 10, 90]   as [number, number, number] },
     ],
     transform: (v: number) => v,
     unit: "%",
-    // Isohumes sur fond parchemin (style Synergie "Hum850"), chaque ligne
-    // prend la couleur du degrade a sa propre valeur (gradientColor) — plus
-    // sature, plus fonce, jusqu'au magenta Synergie (#c026a3) au maximum.
-    // Remplissage plein au-dela de 95% dans ce meme magenta ; legende explicite
-    // sur le rendu.
+    // Pas un degrade a bandes fines (9 paliers de 10% : trop proche d'un
+    // degrade continu, retour utilisateur "toujours pas assez comprehensible,
+    // on ne sait pas directement si c'est sec/humide/sature"). Synergie
+    // classe en categories nettes (peu de classes, couleurs tranchees, zones
+    // organiques) plutot qu'un gradient fin — reproduit ici avec 4 classes et
+    // des couleurs choisies a la main (`bandColors`, pas derivees d'un
+    // degrade) : sec = invisible (blanc, comme le fond), le reste en rose
+    // clair -> magenta franc -> magenta sombre. Isolignes desactivees
+    // (`hideLines`) — c'est le remplissage categoriel qui porte l'info
+    // desormais, pas des traits a suivre du regard.
+    bandBoundaries: [30, 60, 85],
+    bandColors: [
+      [255, 255, 255], // < 30% (sec) — invisible sur fond blanc
+      [244, 166, 210],  // 30-60% (modere) — rose clair
+      [230, 60, 170],   // 60-85% (humide) — magenta
+      [230, 25, 154],   // > 85% (sature) — magenta franc (#E6199A, capture Synergie)
+    ],
     contours: {
-      step: 10, decimals: 0, color: "#c026a3", gradientColor: true,
-      highlightAbove: { threshold: 95, color: "#c026a3", label: "Zone saturée (≥ 95%)" },
-      background: "cream",
+      step: 10, decimals: 0, color: "#1a1a1a", withFill: true,
+      plainTitle: true, hideLines: true,
     },
   },
   precip: {
