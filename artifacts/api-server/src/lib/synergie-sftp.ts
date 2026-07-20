@@ -18,10 +18,16 @@ export type SynergieFile = {
 // (briefing-catalog.ts), qui se base sur des images NOAA publiques et ne reflete
 // pas forcement ce que SYABAN02 a recu/indexe en interne. Le cycle le plus
 // recent avec au moins 2h de marge (reception + extraction + eclatement grib).
+//
+// SYABAN02 (US2.GFSAFR025) n'archive QUE les cycles 00Z et 12Z — confirme par
+// inspection directe de /data-space/data/grib/US2.GFSAFR025 (10 dossiers,
+// tous en ...000000 ou ...120000, aucun ...060000 ni ...180000). Choisir 06/18
+// ici produisait un "reseau" qui n'a jamais existe dans l'archive, d'ou
+// l'echec systematique de tous les champs (pas un probleme reseau/SSH).
 export function computeSynergieReseau(): string {
   const nowHour = new Date().getUTCHours();
-  const candidates = [18, 12, 6, 0];
-  const chosen = candidates.find((c) => nowHour - c >= 2) ?? 18;
+  const candidates = [12, 0];
+  const chosen = candidates.find((c) => nowHour - c >= 2) ?? 12;
   return `${String(chosen).padStart(2, "0")}H`;
 }
 
