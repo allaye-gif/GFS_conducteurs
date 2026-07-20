@@ -107,7 +107,15 @@ async function doExtractGribGrid(
   const { stdout } = await runSSHCommand(script);
 
   if (stdout.includes("__NODATA__")) {
-    throw new Error(`Aucune donnée extraite pour ${param}.${niveau}.${echeance} (réseau ${synDate})`);
+    // Le detail (stderr de extr_grib_modele.sh, ex: erreur SSH/webservice
+    // distant, reseau introuvable, etc.) etait lu (`cat ${errFile}`) mais
+    // jamais remonte — on ne voyait que "aucune donnee", jamais la vraie
+    // cause. On l'inclut desormais dans le message d'erreur.
+    const detail = stdout.split("__NODATA__")[1]?.trim();
+    throw new Error(
+      `Aucune donnée extraite pour ${param}.${niveau}.${echeance} (réseau ${synDate})` +
+      (detail ? ` — detail SYABAN02: ${detail}` : "")
+    );
   }
 
   const metaSection = stdout.split("__GRIDMETA__")[1]?.split("__DATA__")[0]?.trim() ?? "";
