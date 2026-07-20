@@ -55,3 +55,7 @@ Thumbs.db
 
 # Fichiers attachés au chat Replit — ne jamais committer
 attached_assets/
+
+# Artefacts generes localement par start.ps1 (tunnel Cloudflare)
+/cloudflared.exe
+/tunnel-url.txt

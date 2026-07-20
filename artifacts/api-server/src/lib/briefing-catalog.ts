@@ -511,15 +511,32 @@ const SYNERGIE_LIVE_PARAMS: { key: string; label: string }[] = [
   { key: "RR6H",  label: "Précipitations 6h" },
   { key: "TOURCOMBO", label: "Tourbillon absolu 850/700/200 hPa" },
 ];
-// Une seule echeance pour l'instant : chaque carte pilote un vrai rendu GUI sur
-// l'unique display X11 partage de SYABAN02 (rendus serialises, voir
-// withGribLock dans routes/synergie.ts) — 7 params x 4 echeances aurait pris
-// bien trop longtemps a charger sur un cache froid. "6H" (pas "06H") : le
-// catalogue GRIB reel n'a jamais "0H" et n'utilise pas de zero devant.
-const SYNERGIE_ECHEANCES = ["6H"];
+// Le RUN (reseau) ne change qu'a 00H et 12H sur SYABAN02 (confirme par
+// inspection directe de /data-space/data/grib/US2.GFSAFR025 : uniquement des
+// dossiers ...000000/...120000) — mais chaque run produit des echeances a
+// +6H/+12H/+18H/+24H, qui donnent bien une sortie valide a 06H/12H/18H/00H
+// pour chaque produit. "6H" (pas "06H") : le catalogue GRIB reel n'a jamais
+// "0H" et n'utilise pas de zero devant.
+// Les 4 echeances sont possibles maintenant (contrairement a l'ancienne
+// limitation "1 seule echeance") : le rendu passe par extraction GRIB directe
+// + SVG maison (grib-render.ts), plus par une capture d'ecran GUI/X11 serialisee
+// (visu_modele) qui prenait 10-60s par carte — cette contrainte de vitesse a
+// disparu avec ce changement d'architecture.
+const SYNERGIE_ECHEANCES = ["6H", "12H", "18H", "24H"];
 
 function synergieGribUrl(key: string, reseau: string, echeance: string): string {
   return `/api/synergie/render-grib?key=${encodeURIComponent(key)}&reseau=${encodeURIComponent(reseau)}&echeance=${encodeURIComponent(echeance)}`;
+}
+
+// Heure valide = reseau + echeance (modulo 24h) — un run 00H a l'echeance
+// +18H est valide a 18H, pas a 00H. Sert uniquement a etiqueter les cartes
+// dans la liste du briefing ; le rendu lui-meme (routes/synergie.ts) fait le
+// meme calcul pour l'overlay affiche sur l'image.
+function validTimeLabel(reseau: string, echeance: string): string {
+  const reseauHour = parseInt(reseau.replace("H", ""), 10) || 0;
+  const echeanceHours = parseInt(echeance.replace("H", ""), 10) || 0;
+  const validHour = (reseauHour + echeanceHours) % 24;
+  return `${String(validHour).padStart(2, "0")}H`;
 }
 
 function buildSynergieSection(): BriefingSection {
@@ -528,9 +545,9 @@ function buildSynergieSection(): BriefingSection {
     label: `${label} — GFSAFR025 réseau ${reseau}`,
     charts: SYNERGIE_ECHEANCES.map((ech) => ({
       id: `synergie-${key}-${ech}`,
-      label: `${label} +${ech}`,
+      label: `${label} — ${validTimeLabel(reseau, ech)}`,
       url: synergieGribUrl(key, reseau, ech),
-      description: `${label} — modèle GFSAFR025 (SYABAN02) — réseau ${reseau} — échéance +${ech}`,
+      description: `${label} — modèle GFSAFR025 (SYABAN02) — réseau ${reseau} — échéance +${ech} (valide ${validTimeLabel(reseau, ech)})`,
     })),
   }));
 

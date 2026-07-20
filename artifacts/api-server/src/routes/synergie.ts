@@ -500,6 +500,14 @@ async function renderGribToLocalFile(
   const synDate = dateArg ?? defDate;
   const duree = cfg.kind === "scalar" ? (cfg.duree ?? echeance) : echeance;
 
+  // Heure VALIDE (reseau + echeance), pas juste l'heure du reseau — le run ne
+  // change qu'a 00H/12H sur SYABAN02, mais une echeance de +18H depuis le
+  // reseau 00H est valide a 18H, pas a 00H. L'overlay affichait jusqu'ici
+  // toujours l'heure du reseau, ce qui etiquetait mal les echeances > 0.
+  const echeanceHours = parseInt(echeance.replace("H", ""), 10) || 0;
+  const validHour = (parseInt(rHH, 10) + echeanceHours) % 24;
+  const validTimeLabel = `${String(validHour).padStart(2, "0")}00`;
+
   const cached = gribCacheKey(key, synDate, echeance, duree);
   if (gribCacheValid(cached)) {
     return { localPath: cached, cfg, fromCache: true, size: fs.statSync(cached).size };
@@ -554,7 +562,7 @@ async function renderGribToLocalFile(
 
     const svg = renderVorticityComboSvg({
       title: cfg.label,
-      overlayTime: `${rHH}00`,
+      overlayTime: validTimeLabel,
       lon0: base.lon0, lon1: base.lon1, lat0: base.lat0, lat1: base.lat1,
       layers,
     });
@@ -595,7 +603,7 @@ async function renderGribToLocalFile(
     contours: "contours" in scale ? scale.contours : undefined,
     bandBoundaries: "bandBoundaries" in scale ? (scale.bandBoundaries as unknown as number[]) : undefined,
     bandColors: "bandColors" in scale ? (scale.bandColors as unknown as [number, number, number][]) : undefined,
-    overlayTime: `${rHH}00`,
+    overlayTime: validTimeLabel,
     windBarbs,
   });
 
@@ -645,17 +653,22 @@ router.get("/synergie/render-grib", async (req, res) => {
 // qu'un utilisateur ouvre le briefing. Ca augmente les chances de tomber dans
 // la fenetre ou les donnees GFS sont reellement extraites sur SYABAN02, et
 // alimente le cache long terme (7h) consulte par la route HTTP ci-dessus.
-const WARM_ECHEANCE = "6H";
+// 4 echeances par produit desormais (voir SYNERGIE_ECHEANCES dans
+// briefing-catalog.ts — memes valeurs, dupliquees ici pour eviter une
+// dependance croisee entre les deux fichiers).
+const WARM_ECHEANCES = ["6H", "12H", "18H", "24H"];
 let warmTimer: ReturnType<typeof setInterval> | null = null;
 
 async function warmSynergieCache(log: RenderLogger): Promise<void> {
   const reseau = computeSynergieReseau();
   for (const key of Object.keys(GFS_PARAMS)) {
-    try {
-      const { fromCache, size } = await renderGribToLocalFile(key, reseau, WARM_ECHEANCE, undefined, log);
-      log.info({ key, reseau, fromCache, size }, "synergie warm: ok");
-    } catch (err) {
-      log.warn({ key, reseau, err }, "synergie warm: échoué");
+    for (const echeance of WARM_ECHEANCES) {
+      try {
+        const { fromCache, size } = await renderGribToLocalFile(key, reseau, echeance, undefined, log);
+        log.info({ key, reseau, echeance, fromCache, size }, "synergie warm: ok");
+      } catch (err) {
+        log.warn({ key, reseau, echeance, err }, "synergie warm: échoué");
+      }
     }
   }
 }
@@ -669,7 +682,7 @@ export function startSynergieWarmScheduler(log: RenderLogger, intervalMs = 20 * 
 
 // POST /api/synergie/render-grib  (body JSON: { key, reseau, echeance, date? })
 router.post("/synergie/render-grib", async (req, res) => {
-  const { key = "PMER", reseau = "00H", echeance = "06H", date: dateArg } = req.body as Record<string, string>;
+  const { key = "PMER", reseau = "00H", echeance = "6H", date: dateArg } = req.body as Record<string, string>;
   await handleRenderGrib(key, reseau, echeance, dateArg, req.log, res);
 });
 
