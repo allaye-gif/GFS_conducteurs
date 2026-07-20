@@ -38,6 +38,11 @@ export interface VorticityComboOptions {
   overlayTime?: string;
   lon0: number; lon1: number; lat0: number; lat1: number;
   layers: VorticityLayer[];
+  // Zoome l'affichage sur une sous-region (ex: Mali) — lon0/lon1/lat0/lat1
+  // ci-dessus restent l'emprise reelle de la grille (necessaires a traceContours
+  // pour placer correctement chaque point), viewBounds ne change que la
+  // projection ecran, comme dans grib-render.ts.
+  viewBounds?: { lon0: number; lon1: number; lat0: number; lat1: number };
 }
 
 function escapeXml(s: string): string {
@@ -46,10 +51,14 @@ function escapeXml(s: string): string {
 
 export function renderVorticityComboSvg(opts: VorticityComboOptions): string {
   const { lon0, lon1, lat0, lat1, layers } = opts;
-  const lonSpan = lon1 - lon0 || 1;
-  const latSpan = lat1 - lat0 || 1;
-  const xFor = (lon: number) => MARGIN.left + ((lon - lon0) / lonSpan) * PLOT_W;
-  const yFor = (lat: number) => MARGIN.top + (1 - (lat - lat0) / latSpan) * PLOT_H;
+  const viewLon0 = opts.viewBounds?.lon0 ?? lon0;
+  const viewLon1 = opts.viewBounds?.lon1 ?? lon1;
+  const viewLat0 = opts.viewBounds?.lat0 ?? lat0;
+  const viewLat1 = opts.viewBounds?.lat1 ?? lat1;
+  const viewLonSpan = viewLon1 - viewLon0 || 1;
+  const viewLatSpan = viewLat1 - viewLat0 || 1;
+  const xFor = (lon: number) => MARGIN.left + ((lon - viewLon0) / viewLonSpan) * PLOT_W;
+  const yFor = (lat: number) => MARGIN.top + (1 - (lat - viewLat0) / viewLatSpan) * PLOT_H;
 
   const layerPaths: string[] = [];
   for (const layer of layers) {
@@ -77,13 +86,13 @@ export function renderVorticityComboSvg(opts: VorticityComboOptions): string {
   }
 
   const gridLines: string[] = [];
-  const lonStep = lonSpan > 40 ? 10 : 5;
-  const latStep = latSpan > 30 ? 10 : 5;
-  for (let lon = Math.ceil(lon0 / lonStep) * lonStep; lon <= lon1; lon += lonStep) {
+  const lonStep = viewLonSpan > 40 ? 10 : viewLonSpan > 15 ? 5 : 2;
+  const latStep = viewLatSpan > 30 ? 10 : viewLatSpan > 15 ? 5 : 2;
+  for (let lon = Math.ceil(viewLon0 / lonStep) * lonStep; lon <= viewLon1; lon += lonStep) {
     const x = xFor(lon);
     gridLines.push(`<line x1="${x.toFixed(1)}" y1="${MARGIN.top}" x2="${x.toFixed(1)}" y2="${MARGIN.top + PLOT_H}" stroke="#d8a0c0" stroke-width="0.3"/>`);
   }
-  for (let lat = Math.ceil(lat0 / latStep) * latStep; lat <= lat1; lat += latStep) {
+  for (let lat = Math.ceil(viewLat0 / latStep) * latStep; lat <= viewLat1; lat += latStep) {
     const y = yFor(lat);
     gridLines.push(`<line x1="${MARGIN.left}" y1="${y.toFixed(1)}" x2="${MARGIN.left + PLOT_W}" y2="${y.toFixed(1)}" stroke="#d8a0c0" stroke-width="0.3"/>`);
   }
@@ -112,7 +121,7 @@ export function renderVorticityComboSvg(opts: VorticityComboOptions): string {
   </defs>
   <rect x="0" y="0" width="${WIDTH}" height="${HEIGHT}" fill="#ffffff"/>
   <rect x="${MARGIN.left}" y="${MARGIN.top}" width="${PLOT_W}" height="${PLOT_H}" fill="${PARCHMENT}"/>
-  <g>${gridLines.join("")}</g>
+  <g clip-path="url(#plotClip)">${gridLines.join("")}</g>
   <g>${layerPaths.join("")}</g>
   <g>${borderPaths.join("")}</g>
   <g>${coastPaths.join("")}</g>

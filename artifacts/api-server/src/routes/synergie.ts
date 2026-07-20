@@ -20,6 +20,13 @@ const MIME: Record<string, string> = {
 const WEBSERV_HOST = () => process.env.SYABAN02_HOST ?? "192.168.0.37";
 const WEBSERV_PORT = () => parseInt(process.env.SYABAN02_WEBSERV_PORT ?? "8080");
 
+// Emprise Mali (avec marge) utilisee pour zoomer l'affichage des cartes vent
+// et TA — la grille extraite garde toute l'emprise GFSAFR025 (Afrique de
+// l'Ouest), seule la projection ecran est recadree (cf. `viewBounds` dans
+// grib-render.ts/grib-vorticity-render.ts), ce qui densifie visuellement les
+// barbules de vent/isolignes sans extraction supplementaire.
+const MALI_BBOX = { lon0: -13, lon1: 5, lat0: 9, lat1: 26 };
+
 const router = Router();
 
 // ─── Cache disque pour render-grib ───────────────────────────────────────────
@@ -565,6 +572,7 @@ async function renderGribToLocalFile(
       overlayTime: validTimeLabel,
       lon0: base.lon0, lon1: base.lon1, lat0: base.lat0, lat1: base.lat1,
       layers,
+      viewBounds: MALI_BBOX,
     });
     fs.writeFileSync(cached, svg, "utf8");
     return { localPath: cached, cfg, fromCache: false, size: Buffer.byteLength(svg) };
@@ -605,6 +613,7 @@ async function renderGribToLocalFile(
     bandColors: "bandColors" in scale ? (scale.bandColors as unknown as [number, number, number][]) : undefined,
     overlayTime: validTimeLabel,
     windBarbs,
+    viewBounds: cfg.kind === "wind" ? MALI_BBOX : undefined,
   });
 
   fs.writeFileSync(cached, svg, "utf8");
@@ -657,17 +666,25 @@ router.get("/synergie/render-grib", async (req, res) => {
 // briefing-catalog.ts — memes valeurs, dupliquees ici pour eviter une
 // dependance croisee entre les deux fichiers).
 const WARM_ECHEANCES = ["6H", "12H", "18H", "24H"];
+// T2M a une disposition speciale (comparaison auj./demain a heures fixes),
+// toujours ancree sur le run 00H — memes valeurs que T2M_RESEAU/T2M_SLOTS
+// dans briefing-catalog.ts (dupliquees ici, meme raison que ci-dessus).
+const T2M_WARM_RESEAU = "00H";
+const T2M_WARM_ECHEANCES = ["6H", "30H", "15H", "39H", "18H", "24H"];
 let warmTimer: ReturnType<typeof setInterval> | null = null;
 
 async function warmSynergieCache(log: RenderLogger): Promise<void> {
   const reseau = computeSynergieReseau();
   for (const key of Object.keys(GFS_PARAMS)) {
-    for (const echeance of WARM_ECHEANCES) {
+    const isT2M = key === "T2M";
+    const warmReseau = isT2M ? T2M_WARM_RESEAU : reseau;
+    const echeances = isT2M ? T2M_WARM_ECHEANCES : WARM_ECHEANCES;
+    for (const echeance of echeances) {
       try {
-        const { fromCache, size } = await renderGribToLocalFile(key, reseau, echeance, undefined, log);
-        log.info({ key, reseau, echeance, fromCache, size }, "synergie warm: ok");
+        const { fromCache, size } = await renderGribToLocalFile(key, warmReseau, echeance, undefined, log);
+        log.info({ key, reseau: warmReseau, echeance, fromCache, size }, "synergie warm: ok");
       } catch (err) {
-        log.warn({ key, reseau, echeance, err }, "synergie warm: échoué");
+        log.warn({ key, reseau: warmReseau, echeance, err }, "synergie warm: échoué");
       }
     }
   }

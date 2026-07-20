@@ -110,6 +110,7 @@ export interface RenderOptions {
   windBarbs?: { u: number[]; v: number[] }; // memes dimensions/emprise que la grille principale
   bandBoundaries?: number[]; // active une legende/aplat a bandes discretes plutot qu'un degrade continu
   bandColors?: [number, number, number][]; // couleurs de bande choisies a la main (boundaries.length + 1) — remplace la derivation automatique depuis `stops`, pour des categories nettement tranchees (ex: sec/modere/humide/sature) plutot qu'un degrade discretise
+  viewBounds?: { lon0: number; lon1: number; lat0: number; lat1: number }; // zoome l'affichage sur une sous-region (ex: Mali) sans changer la grille de donnees extraite (qui garde sa vraie emprise complete, necessaire pour un contourage/positionnement corrects) — utile pour le vent, ou zoomer augmente la densite visible des barbules
 }
 
 // Ratio 4:3 fixe.
@@ -220,11 +221,26 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   const PLOT_W = WIDTH - MARGIN.left - MARGIN.right;
   const PLOT_H = HEIGHT - MARGIN.top - MARGIN.bottom;
 
-  const xFor = (lon: number) => MARGIN.left + ((lon - lon0) / lonSpan) * PLOT_W;
-  const yFor = (lat: number) => MARGIN.top + (1 - (lat - lat0) / latSpan) * PLOT_H;
+  // Emprise affichee : par defaut toute la grille extraite, ou une sous-region
+  // (ex: Mali) si `viewBounds` est fournie — la grille de donnees et son
+  // emprise reelle (lon0/lon1/lat0/lat1) restent inchangees, seule la
+  // projection ecran est recadree, ce qui zoome/densifie visuellement le
+  // contenu de la sous-region sans avoir besoin d'extraire des donnees a part.
+  const viewLon0 = opts.viewBounds?.lon0 ?? lon0;
+  const viewLon1 = opts.viewBounds?.lon1 ?? lon1;
+  const viewLat0 = opts.viewBounds?.lat0 ?? lat0;
+  const viewLat1 = opts.viewBounds?.lat1 ?? lat1;
+  const viewLonSpan = viewLon1 - viewLon0 || 1;
+  const viewLatSpan = viewLat1 - viewLat0 || 1;
 
-  const cellW = (PLOT_W / ni) * STEP;
-  const cellH = (PLOT_H / nj) * STEP;
+  const xFor = (lon: number) => MARGIN.left + ((lon - viewLon0) / viewLonSpan) * PLOT_W;
+  const yFor = (lat: number) => MARGIN.top + (1 - (lat - viewLat0) / viewLatSpan) * PLOT_H;
+
+  // Taille pixel d'une cellule de grille sous le mapping ecran courant — dependante
+  // de viewLonSpan/viewLatSpan (pas seulement de PLOT_W/ni) des qu'on zoome sur une
+  // sous-region, sinon les rects de l'aplat deviendraient trop petits/mal ajustes.
+  const cellW = (STEP * PLOT_W * lonSpan) / (ni * viewLonSpan);
+  const cellH = (STEP * PLOT_H * latSpan) / (nj * viewLatSpan);
   const minClosedAreaPx2 = PLOT_W * PLOT_H * MIN_CLOSED_AREA_FRAC;
 
   // Pour un champ a isolignes + aplat combines (ex: temperature), on lisse le
@@ -259,7 +275,14 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   const windBarbMarkers: string[] = [];
   if (opts.windBarbs) {
     const { u, v } = opts.windBarbs;
-    const BARB_STEP = Math.max(4, Math.round(ni / 22));
+    // Nombre de colonnes de grille visibles dans l'emprise affichee (pas la
+    // grille entiere) : en cas de zoom (viewBounds), on echantillonne plus
+    // finement pour garder ~22 barbules a travers la region visible — sinon
+    // le meme pas d'echantillonnage sur la grille complete ne laisserait que
+    // quelques barbules eparses dans la petite fenetre Mali (effet inverse de
+    // la densite demandee).
+    const visibleCols = Math.max(4, ni * (viewLonSpan / lonSpan));
+    const BARB_STEP = Math.max(2, Math.round(visibleCols / 22));
     for (let row = 0; row < nj; row += BARB_STEP) {
       const lat = lat0 + (row / (nj - 1)) * latSpan;
       for (let col = 0; col < ni; col += BARB_STEP) {
@@ -476,7 +499,7 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   const cityMarkers: string[] = [];
   if (!hasIsolines) {
     for (const city of CITIES) {
-      if (city.lon < lon0 || city.lon > lon1 || city.lat < lat0 || city.lat > lat1) continue;
+      if (city.lon < viewLon0 || city.lon > viewLon1 || city.lat < viewLat0 || city.lat > viewLat1) continue;
       const x = xFor(city.lon);
       const y = yFor(city.lat);
       cityMarkers.push(
@@ -490,16 +513,16 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   // graduations en degres ne sont affichees que pour les cartes en aplat
   // (les cartes a isolignes n'ont pas d'axes, comme une vraie capture logiciel).
   const gridLines: string[] = [];
-  const lonStep = lonSpan > 40 ? 10 : 5;
-  const latStep = latSpan > 30 ? 10 : 5;
-  for (let lon = Math.ceil(lon0 / lonStep) * lonStep; lon <= lon1; lon += lonStep) {
+  const lonStep = viewLonSpan > 40 ? 10 : viewLonSpan > 15 ? 5 : 2;
+  const latStep = viewLatSpan > 30 ? 10 : viewLatSpan > 15 ? 5 : 2;
+  for (let lon = Math.ceil(viewLon0 / lonStep) * lonStep; lon <= viewLon1; lon += lonStep) {
     const x = xFor(lon);
     gridLines.push(`<line x1="${x.toFixed(1)}" y1="${MARGIN.top}" x2="${x.toFixed(1)}" y2="${MARGIN.top + PLOT_H}" stroke="#d8a0c0" stroke-width="0.3"/>`);
     if (!hasIsolines) {
       gridLines.push(`<text x="${x.toFixed(1)}" y="${MARGIN.top + PLOT_H + 18}" font-size="11" fill="#334155" text-anchor="middle">${lon}°</text>`);
     }
   }
-  for (let lat = Math.ceil(lat0 / latStep) * latStep; lat <= lat1; lat += latStep) {
+  for (let lat = Math.ceil(viewLat0 / latStep) * latStep; lat <= viewLat1; lat += latStep) {
     const y = yFor(lat);
     gridLines.push(`<line x1="${MARGIN.left}" y1="${y.toFixed(1)}" x2="${MARGIN.left + PLOT_W}" y2="${y.toFixed(1)}" stroke="#d8a0c0" stroke-width="0.3"/>`);
     if (!hasIsolines) {
@@ -623,8 +646,8 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   </defs>
   <rect x="0" y="0" width="${WIDTH}" height="${HEIGHT}" fill="#ffffff"/>
   <rect x="${MARGIN.left}" y="${MARGIN.top}" width="${PLOT_W}" height="${PLOT_H}" fill="${plotBackground}"/>
-  <g>${rects.join("")}</g>
-  <g>${gridLines.join("")}</g>
+  <g clip-path="url(#plotClip)">${rects.join("")}</g>
+  <g clip-path="url(#plotClip)">${gridLines.join("")}</g>
   <g>${highlightRects.join("")}</g>
   <g>${borderPaths.join("")}</g>
   <g>${coastPaths.join("")}</g>

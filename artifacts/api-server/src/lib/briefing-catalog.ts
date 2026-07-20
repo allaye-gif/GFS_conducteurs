@@ -524,6 +524,27 @@ const SYNERGIE_LIVE_PARAMS: { key: string; label: string }[] = [
 // disparu avec ce changement d'architecture.
 const SYNERGIE_ECHEANCES = ["6H", "12H", "18H", "24H"];
 
+// Disposition speciale pour T2M : comparer les memes heures d'un jour a
+// l'autre (06h/15h aujourd'hui vs demain) plutot que les 4 echeances brutes
+// du run — demande explicite. Ancree sur le run 00H du jour (pas le reseau
+// "actif" dynamique de computeSynergieReseau, qui peut etre 12H l'apres-midi
+// et ne peut alors plus produire une echeance valide pour "06h/15h
+// aujourd'hui", deja passes) : seul un run 00H peut atteindre les 6 heures
+// cibles avec une echeance positive. L'ordre de la liste pilote directement
+// la disposition a 2 colonnes du frontend (2 elements par ligne) :
+// ligne 1 = 06h auj./06h demain, ligne 2 = 15h auj./15h demain,
+// ligne 3 = 18h auj./00h (transition demain, regroupe avec "aujourd'hui"
+// dans le libelle par commodite operationnelle).
+const T2M_RESEAU = "00H";
+const T2M_SLOTS: { echeance: string; label: string }[] = [
+  { echeance: "6H",  label: "06h — Aujourd'hui" },
+  { echeance: "30H", label: "06h — Demain" },
+  { echeance: "15H", label: "15h — Aujourd'hui" },
+  { echeance: "39H", label: "15h — Demain" },
+  { echeance: "18H", label: "18h — Aujourd'hui" },
+  { echeance: "24H", label: "00h — Aujourd'hui" },
+];
+
 function synergieGribUrl(key: string, reseau: string, echeance: string): string {
   return `/api/synergie/render-grib?key=${encodeURIComponent(key)}&reseau=${encodeURIComponent(reseau)}&echeance=${encodeURIComponent(echeance)}`;
 }
@@ -541,15 +562,28 @@ function validTimeLabel(reseau: string, echeance: string): string {
 
 function buildSynergieSection(): BriefingSection {
   const reseau = computeSynergieReseau();
-  const subsections = SYNERGIE_LIVE_PARAMS.map(({ key, label }) => ({
-    label: `${label} — GFSAFR025 réseau ${reseau}`,
-    charts: SYNERGIE_ECHEANCES.map((ech) => ({
-      id: `synergie-${key}-${ech}`,
-      label: `${label} — ${validTimeLabel(reseau, ech)}`,
-      url: synergieGribUrl(key, reseau, ech),
-      description: `${label} — modèle GFSAFR025 (SYABAN02) — réseau ${reseau} — échéance +${ech} (valide ${validTimeLabel(reseau, ech)})`,
-    })),
-  }));
+  const subsections = SYNERGIE_LIVE_PARAMS.map(({ key, label }) => {
+    if (key === "T2M") {
+      return {
+        label: `${label} — GFSAFR025 réseau ${T2M_RESEAU} (comparaison auj./demain)`,
+        charts: T2M_SLOTS.map(({ echeance, label: slotLabel }) => ({
+          id: `synergie-${key}-${echeance}`,
+          label: `${label} — ${slotLabel}`,
+          url: synergieGribUrl(key, T2M_RESEAU, echeance),
+          description: `${label} — modèle GFSAFR025 (SYABAN02) — réseau ${T2M_RESEAU} — échéance +${echeance} (valide ${validTimeLabel(T2M_RESEAU, echeance)})`,
+        })),
+      };
+    }
+    return {
+      label: `${label} — GFSAFR025 réseau ${reseau}`,
+      charts: SYNERGIE_ECHEANCES.map((ech) => ({
+        id: `synergie-${key}-${ech}`,
+        label: `${label} — ${validTimeLabel(reseau, ech)}`,
+        url: synergieGribUrl(key, reseau, ech),
+        description: `${label} — modèle GFSAFR025 (SYABAN02) — réseau ${reseau} — échéance +${ech} (valide ${validTimeLabel(reseau, ech)})`,
+      })),
+    };
+  });
 
   return {
     id: "synergie",

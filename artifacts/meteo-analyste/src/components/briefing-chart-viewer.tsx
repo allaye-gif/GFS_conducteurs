@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import {
   ExternalLink, ImageOff, PenLine, Monitor, Upload, X, Plus,
-  Pen, Circle, ArrowRight, Undo2, Check, Pencil, Type, ListFilter,
+  Pen, Circle, ArrowRight, Undo2, Check, Pencil, Type,
 } from "lucide-react";
 
 type BriefingSectionX = BriefingSection & {
@@ -832,8 +832,9 @@ function MisvaTopRightCrop({
 
 /* ── Images section ────────────────────────────────────────── */
 /* ── SynergiePicker ────────────────────────────────────────── */
-const SYNERGIE_SEL_KEY = "synergie_selection";
-
+// Affiche directement tous les champs Synergie disponibles, sans zone de
+// sélection — l'ancien picker ("Choisir les champs") obligeait a cocher
+// chaque champ un par un avant de rien voir, juge inutile.
 function SynergiePicker({
   section, sectionNotes, onNoteChange, readOnly,
 }: {
@@ -842,133 +843,24 @@ function SynergiePicker({
   onNoteChange?: (key: string, val: string) => void;
   readOnly?: boolean;
 }) {
-  const [pickerOpen, setPickerOpen] = useState(false);
-
   const allCharts = section.subsections.flatMap((s) => s.charts);
-  const rawSel = sectionNotes[SYNERGIE_SEL_KEY] ?? "";
-  const selectedIds = rawSel ? rawSel.split(",").filter(Boolean) : [];
-  const hasSelection = selectedIds.length > 0;
-  const displayCharts = hasSelection
-    ? allCharts.filter((c) => selectedIds.includes(c.id))
-    : [];
 
-  function toggleChart(id: string) {
-    const s = new Set(selectedIds);
-    if (s.has(id)) s.delete(id); else s.add(id);
-    onNoteChange?.(SYNERGIE_SEL_KEY, Array.from(s).join(","));
-  }
-
-  if (readOnly) {
-    if (displayCharts.length === 0) {
-      return (
-        <div className="py-4 text-center text-sm text-muted-foreground/60 italic">
-          Aucun champ Synergie sélectionné.
-        </div>
-      );
-    }
+  if (allCharts.length === 0) {
     return (
-      <div className="space-y-3">
-        <div className={cn("grid gap-3", gridClass(displayCharts.length))}>
-          {displayCharts.map((chart) => (
-            <BriefingImageCard key={chart.id} {...chart}
-              sectionNotes={sectionNotes} onNoteChange={onNoteChange} readOnly={readOnly} />
-          ))}
-        </div>
-        <ExtraUploads sectionId={section.id} sectionNotes={sectionNotes}
-          onNoteChange={onNoteChange} readOnly={readOnly} />
+      <div className="py-4 text-center text-sm text-muted-foreground/60 italic">
+        Aucun fichier disponible sur SYABAN02.
       </div>
     );
   }
 
   return (
     <div className="space-y-3">
-      {/* Barre de contrôle */}
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-xs text-muted-foreground">
-          {allCharts.length === 0
-            ? "Aucun fichier disponible sur SYABAN02"
-            : hasSelection
-            ? `${selectedIds.length} champ${selectedIds.length > 1 ? "s" : ""} sélectionné${selectedIds.length > 1 ? "s" : ""} sur ${allCharts.length}`
-            : `${allCharts.length} fichier${allCharts.length > 1 ? "s" : ""} disponible${allCharts.length > 1 ? "s" : ""} — aucun sélectionné`}
-        </span>
-        {allCharts.length > 0 && (
-          <Button variant={pickerOpen ? "default" : "outline"} size="sm"
-            className="gap-2 text-xs h-7" onClick={() => setPickerOpen((v) => !v)}>
-            <ListFilter className="h-3.5 w-3.5" />
-            {pickerOpen ? "Fermer" : "Choisir les champs"}
-          </Button>
-        )}
+      <div className={cn("grid gap-3", gridClass(allCharts.length))}>
+        {allCharts.map((chart) => (
+          <BriefingImageCard key={chart.id} {...chart}
+            sectionNotes={sectionNotes} onNoteChange={onNoteChange} readOnly={readOnly} />
+        ))}
       </div>
-
-      {/* Panneau picker */}
-      {pickerOpen && (
-        <div className="rounded-xl border border-border bg-muted/20 p-4 space-y-4">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold uppercase tracking-widest text-muted-foreground/70">
-              ARCHIVE — SYABAN02
-            </span>
-            <div className="flex gap-1">
-              <Button variant="ghost" size="sm" className="text-xs h-6 px-2"
-                onClick={() => onNoteChange?.(SYNERGIE_SEL_KEY, allCharts.map((c) => c.id).join(","))}>
-                Tout
-              </Button>
-              <Button variant="ghost" size="sm" className="text-xs h-6 px-2"
-                onClick={() => onNoteChange?.(SYNERGIE_SEL_KEY, "")}>
-                Aucun
-              </Button>
-            </div>
-          </div>
-
-          {section.subsections.map((sub) => (
-            <div key={sub.label} className="space-y-1.5">
-              {section.subsections.length > 1 && (
-                <p className="text-[11px] font-medium text-muted-foreground/70 uppercase tracking-wide">
-                  {sub.label}
-                </p>
-              )}
-              <div className="flex flex-wrap gap-2">
-                {sub.charts.map((chart) => {
-                  const sel = selectedIds.includes(chart.id);
-                  return (
-                    <button key={chart.id} onClick={() => toggleChart(chart.id)}
-                      className={cn(
-                        "flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs transition-all",
-                        sel
-                          ? "border-primary bg-primary/10 text-primary font-medium"
-                          : "border-border bg-background text-muted-foreground hover:border-foreground/30 hover:text-foreground"
-                      )}>
-                      <div className={cn(
-                        "h-3.5 w-3.5 rounded border flex items-center justify-center shrink-0",
-                        sel ? "bg-primary border-primary" : "border-muted-foreground/40"
-                      )}>
-                        {sel && <Check className="h-2.5 w-2.5 text-primary-foreground" />}
-                      </div>
-                      {chart.label}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Aperçu des champs sélectionnés */}
-      {displayCharts.length > 0 && (
-        <div className={cn("grid gap-3", gridClass(displayCharts.length))}>
-          {displayCharts.map((chart) => (
-            <BriefingImageCard key={chart.id} {...chart}
-              sectionNotes={sectionNotes} onNoteChange={onNoteChange} readOnly={readOnly} />
-          ))}
-        </div>
-      )}
-
-      {!hasSelection && !pickerOpen && allCharts.length > 0 && (
-        <div className="py-8 text-center text-sm text-muted-foreground/50 italic border border-dashed border-border rounded-xl">
-          Cliquez sur « Choisir les champs » pour sélectionner les images à inclure
-        </div>
-      )}
-
       <ExtraUploads sectionId={section.id} sectionNotes={sectionNotes}
         onNoteChange={onNoteChange} readOnly={readOnly} />
     </div>
@@ -1500,10 +1392,7 @@ export function BriefingChartViewer({
           <div className="flex items-center gap-3 text-left">
             <span className="font-semibold text-sm text-foreground leading-tight">{section.name}</span>
             <div className="flex items-center gap-1.5">
-              {section.id === "synergie" && (
-                <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-muted-foreground border-border">Sélection</Badge>
-              )}
-              {section.id !== "synergie" && section.contentType === "images" && (
+              {(section.id === "synergie" || section.contentType === "images") && (
                 <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-muted-foreground border-border">Auto</Badge>
               )}
               {section.contentType === "external" && (
@@ -1517,9 +1406,6 @@ export function BriefingChartViewer({
               )}
               {!readOnly && hasNote && <PenLine className="h-3.5 w-3.5 text-primary/70" />}
               {!readOnly && hasUploadedImages && <Upload className="h-3.5 w-3.5 text-primary/70" />}
-              {!readOnly && section.id === "synergie" && (sectionNotes[SYNERGIE_SEL_KEY] ?? "").length > 0 && (
-                <ListFilter className="h-3.5 w-3.5 text-primary/70" />
-              )}
             </div>
           </div>
         </AccordionTrigger>
