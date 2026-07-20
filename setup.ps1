@@ -12,7 +12,11 @@ Set-Location $PSScriptRoot
 # Etape 1 - Node.js
 Write-Host "[1/4] Verification Node.js..." -ForegroundColor Yellow
 try {
-    $nodeVersion = node --version 2>&1
+    # Pas de 2>&1 ici : en PowerShell 5.1, rediriger stderr d'une commande
+    # native la transforme en erreur terminante des que $ErrorActionPreference
+    # = "Stop", meme si la commande a reussi (c'est ce qui faisait planter
+    # l'installation sur un simple message d'avertissement de pnpm).
+    $nodeVersion = node --version
     Write-Host "      OK - $nodeVersion" -ForegroundColor Green
 } catch {
     Write-Host "ERREUR: Node.js non installe." -ForegroundColor Red
@@ -30,7 +34,7 @@ if ($LASTEXITCODE -ne 0) {
     Read-Host "Appuie sur Entree pour fermer"
     exit 1
 }
-$pnpmVersion = pnpm --version 2>&1
+$pnpmVersion = pnpm --version
 Write-Host "      OK - pnpm $pnpmVersion" -ForegroundColor Green
 
 # Etape 3 - Dependances

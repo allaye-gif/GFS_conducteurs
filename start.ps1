@@ -61,19 +61,24 @@ foreach ($port in @($apiPort, $frontendPort)) {
 
 Write-Host ""
 Write-Host "[1/5] Recuperation des mises a jour..." -ForegroundColor Yellow
-git pull 2>&1 | Out-Null
+# git pull est "best effort" (pas de remote configure sur certains postes) —
+# ne doit jamais faire echouer le demarrage. Ne pas rediriger stderr (2>&1) :
+# en PowerShell 5.1 ca transforme n'importe quel message stderr d'une commande
+# native en erreur terminante des que $ErrorActionPreference = "Stop", meme si
+# la commande a reussi.
+try { git pull | Out-Null } catch { Write-Host "      (pas de mise a jour recuperee, on continue)" -ForegroundColor Gray }
 Write-Host "      OK" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "[2/5] Installation des dependances..." -ForegroundColor Yellow
-pnpm install 2>&1 | Out-Null
+pnpm install | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERREUR: pnpm install echoue" -ForegroundColor Red
     Read-Host "Appuie sur Entree pour fermer"
     exit 1
 }
 # Compilation des modules natifs (ssh2 / cpu-features)
-pnpm rebuild cpu-features ssh2 2>&1 | Out-Null
+pnpm rebuild cpu-features ssh2 | Out-Null
 Write-Host "      OK" -ForegroundColor Green
 
 Write-Host ""
