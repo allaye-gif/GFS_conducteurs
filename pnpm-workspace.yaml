@@ -151,6 +151,6 @@ overrides:
   esbuild: "0.27.3"
 
 allowBuilds:
-  cpu-features: set this to true or false
-  esbuild: set this to true or false
-  ssh2: set this to true or false
+  cpu-features: true
+  esbuild: true
+  ssh2: true

@@ -18,16 +18,15 @@ $action = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
     -Argument "-ExecutionPolicy Bypass -WindowStyle Normal -File `"$ps1Path`""
 
-# Declencheur : a chaque ouverture de session
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+# Déclencheur : à chaque ouverture de session
+$trigger = New-ScheduledTaskTrigger -AtLogOn
 
-# Parametres
+# Paramètres compatibles Windows Server 2019
 $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Hours 0) `
-    -MultipleInstances IgnoreNew `
-    -StartWhenAvailable $true
+    -MultipleInstances IgnoreNew
 
-# Enregistrer la tache
+# Enregistrer la tâche
 Register-ScheduledTask `
     -TaskName $taskName `
     -Action $action `
@@ -44,6 +43,11 @@ Write-Host "  La tache '$taskName' est installee."
 Write-Host "  L'application demarrera automatiquement"
 Write-Host "  a chaque connexion Windows."
 Write-Host "================================================"
+Write-Host ""
+
+# Vérification
+Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+
 Write-Host ""
 Write-Host "Appuyez sur une touche pour fermer..."
 [Console]::ReadKey() | Out-Null
