@@ -24,11 +24,64 @@ export type SynergieFile = {
 // tous en ...000000 ou ...120000, aucun ...060000 ni ...180000). Choisir 06/18
 // ici produisait un "reseau" qui n'a jamais existe dans l'archive, d'ou
 // l'echec systematique de tous les champs (pas un probleme reseau/SSH).
-export function computeSynergieReseau(): string {
-  const nowHour = new Date().getUTCHours();
-  const candidates = [12, 0];
-  const chosen = candidates.find((c) => nowHour - c >= 2) ?? 12;
-  return `${String(chosen).padStart(2, "0")}H`;
+function dateStr(d: Date): string {
+  return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, "0")}${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+// Cache court (5 min) : evite un aller-retour SSH a chaque resolution, tout en
+// restant assez court pour reagir vite si SYABAN02 rattrape un cycle en retard
+// (ex: apres un redemarrage de la machine).
+let reseauCache: { value: { reseau: string; synDate: string }; expiresAt: number } | null = null;
+const RESEAU_CACHE_TTL = 5 * 60 * 1000;
+
+async function dirExists(remotePath: string): Promise<boolean> {
+  try {
+    const { stdout } = await runSSHCommand(`test -d "${remotePath}" && echo __DIR_OK__`);
+    return stdout.includes("__DIR_OK__");
+  } catch {
+    return false;
+  }
+}
+
+// Resout le reseau le plus recent DONT le dossier existe reellement sur
+// SYABAN02 (pas juste "l'heure actuelle dit que ce cycle devrait exister") —
+// si SYABAN02 a ete eteint/redemarre et n'a pas encore rattrape le cycle du
+// jour attendu par l'heuristique horaire, on retombe sur le cycle precedent
+// (y compris la veille) plutot que d'echouer sur tous les champs.
+export async function resolveSynergieReseau(): Promise<{ reseau: string; synDate: string }> {
+  const now = Date.now();
+  if (reseauCache && now < reseauCache.expiresAt) return reseauCache.value;
+
+  const nowDate = new Date();
+  const nowHour = nowDate.getUTCHours();
+  const today = dateStr(nowDate);
+  const yesterday = dateStr(new Date(nowDate.getTime() - 86_400_000));
+
+  const candidates: { date: string; hour: number }[] = [
+    ...[12, 0].filter((c) => nowHour - c >= 2).map((hour) => ({ date: today, hour })),
+    { date: yesterday, hour: 12 },
+    { date: yesterday, hour: 0 },
+  ];
+
+  for (const { date, hour } of candidates) {
+    const synDate = `${date}${String(hour).padStart(2, "0")}0000`;
+    if (await dirExists(`/data-space/data/grib/US2.GFSAFR025/${synDate}`)) {
+      const value = { reseau: `${String(hour).padStart(2, "0")}H`, synDate };
+      reseauCache = { value, expiresAt: now + RESEAU_CACHE_TTL };
+      return value;
+    }
+  }
+
+  // Rien de verifie disponible (tres improbable) — repli sur l'heuristique
+  // d'origine sans verification, pour ne pas bloquer completement le rendu ;
+  // l'erreur habituelle ("Aucune donnee extraite") prendra le relais si besoin.
+  const fallbackHour = [12, 0].find((c) => nowHour - c >= 2) ?? 12;
+  const value = {
+    reseau: `${String(fallbackHour).padStart(2, "0")}H`,
+    synDate: `${today}${String(fallbackHour).padStart(2, "0")}0000`,
+  };
+  reseauCache = { value, expiresAt: now + RESEAU_CACHE_TTL };
+  return value;
 }
 
 const IMG_EXT  = /\.(png|jpg|jpeg|gif)$/i;

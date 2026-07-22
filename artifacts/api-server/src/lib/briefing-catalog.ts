@@ -1,5 +1,5 @@
 import { getWaffgsLatestTime } from "./waffgs-proxy";
-import { computeSynergieReseau } from "./synergie-sftp.js";
+import { resolveSynergieReseau } from "./synergie-sftp.js";
 
 export type BriefingContentType = "images" | "iframe" | "external" | "upload";
 
@@ -527,7 +527,7 @@ const SYNERGIE_ECHEANCES = ["6H", "12H", "18H", "24H"];
 // Disposition speciale pour T2M : comparer les memes heures d'un jour a
 // l'autre (06h/15h aujourd'hui vs demain) plutot que les 4 echeances brutes
 // du run — demande explicite. Ancree sur le run 00H du jour (pas le reseau
-// "actif" dynamique de computeSynergieReseau, qui peut etre 12H l'apres-midi
+// "actif" dynamique de resolveSynergieReseau, qui peut etre 12H l'apres-midi
 // et ne peut alors plus produire une echeance valide pour "06h/15h
 // aujourd'hui", deja passes) : seul un run 00H peut atteindre les 6 heures
 // cibles avec une echeance positive. L'ordre de la liste pilote directement
@@ -545,8 +545,9 @@ const T2M_SLOTS: { echeance: string; label: string }[] = [
   { echeance: "24H", label: "00h — Aujourd'hui" },
 ];
 
-function synergieGribUrl(key: string, reseau: string, echeance: string): string {
-  return `/api/synergie/render-grib?key=${encodeURIComponent(key)}&reseau=${encodeURIComponent(reseau)}&echeance=${encodeURIComponent(echeance)}`;
+function synergieGribUrl(key: string, reseau: string, echeance: string, synDate?: string): string {
+  const dateParam = synDate ? `&date=${encodeURIComponent(synDate)}` : "";
+  return `/api/synergie/render-grib?key=${encodeURIComponent(key)}&reseau=${encodeURIComponent(reseau)}&echeance=${encodeURIComponent(echeance)}${dateParam}`;
 }
 
 // Heure valide = reseau + echeance (modulo 24h) — un run 00H a l'echeance
@@ -560,8 +561,8 @@ function validTimeLabel(reseau: string, echeance: string): string {
   return `${String(validHour).padStart(2, "0")}H`;
 }
 
-function buildSynergieSection(): BriefingSection {
-  const reseau = computeSynergieReseau();
+async function buildSynergieSection(): Promise<BriefingSection> {
+  const { reseau, synDate } = await resolveSynergieReseau();
   const subsections = SYNERGIE_LIVE_PARAMS.map(({ key, label }) => {
     if (key === "T2M") {
       return {
@@ -579,7 +580,7 @@ function buildSynergieSection(): BriefingSection {
       charts: SYNERGIE_ECHEANCES.map((ech) => ({
         id: `synergie-${key}-${ech}`,
         label: `${label} — ${validTimeLabel(reseau, ech)}`,
-        url: synergieGribUrl(key, reseau, ech),
+        url: synergieGribUrl(key, reseau, ech, synDate),
         description: `${label} — modèle GFSAFR025 (SYABAN02) — réseau ${reseau} — échéance +${ech} (valide ${validTimeLabel(reseau, ech)})`,
       })),
     };
@@ -611,7 +612,7 @@ export async function getBriefingCatalog(): Promise<BriefingCatalogResult> {
     buildMisvaLowLevSection(),
   ]);
 
-  const synergieSection = buildSynergieSection();
+  const synergieSection = await buildSynergieSection();
 
   const ecmwfSection = ecmwfBaseTime
     ? await buildEcmwfSection(ecmwfBaseTime)

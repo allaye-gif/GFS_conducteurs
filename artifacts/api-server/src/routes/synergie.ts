@@ -6,7 +6,7 @@ import * as http from "http";
 import {
   listSynergieArchive, syncArchiveToCache,
   getCachedFile, localCachePath, resolveArchivePath,
-  openSFTP, runSSHCommand, readRemoteFile, computeSynergieReseau,
+  openSFTP, runSSHCommand, readRemoteFile, resolveSynergieReseau,
 } from "../lib/synergie-sftp.js";
 import { extractGribGrid, type GribGrid } from "../lib/grib-extract.js";
 import { renderGribSvg, SCALES, type ColorStop } from "../lib/grib-render.js";
@@ -650,10 +650,19 @@ async function handleRenderGrib(
 // et n'utilise pas de zero devant ("6H", "12H" — pas "06H"). Un format different
 // ne matche aucun fichier reel.
 router.get("/synergie/render-grib", async (req, res) => {
-  const key     = String(req.query["key"]      ?? "PMER");
-  const reseau  = String(req.query["reseau"]   ?? computeSynergieReseau());
+  const key      = String(req.query["key"] ?? "PMER");
   const echeance = String(req.query["echeance"] ?? "6H");
-  const dateArg = req.query["date"] ? String(req.query["date"]) : undefined;
+  let reseau  = req.query["reseau"] ? String(req.query["reseau"]) : undefined;
+  let dateArg = req.query["date"] ? String(req.query["date"]) : undefined;
+  if (!reseau) {
+    // Pas de reseau explicite : resout le cycle le plus recent DONT le
+    // dossier existe vraiment sur SYABAN02 (avec repli automatique si le
+    // cycle attendu par l'heure n'a pas encore ete rattrape, ex: apres un
+    // redemarrage de SYABAN02) — voir resolveSynergieReseau.
+    const resolved = await resolveSynergieReseau();
+    reseau = resolved.reseau;
+    dateArg = dateArg ?? resolved.synDate;
+  }
   await handleRenderGrib(key, reseau, echeance, dateArg, req.log, res);
 });
 
@@ -674,14 +683,15 @@ const T2M_WARM_ECHEANCES = ["6H", "30H", "15H", "39H", "18H", "24H"];
 let warmTimer: ReturnType<typeof setInterval> | null = null;
 
 async function warmSynergieCache(log: RenderLogger): Promise<void> {
-  const reseau = computeSynergieReseau();
+  const { reseau, synDate } = await resolveSynergieReseau();
   for (const key of Object.keys(GFS_PARAMS)) {
     const isT2M = key === "T2M";
     const warmReseau = isT2M ? T2M_WARM_RESEAU : reseau;
+    const warmDate = isT2M ? undefined : synDate;
     const echeances = isT2M ? T2M_WARM_ECHEANCES : WARM_ECHEANCES;
     for (const echeance of echeances) {
       try {
-        const { fromCache, size } = await renderGribToLocalFile(key, warmReseau, echeance, undefined, log);
+        const { fromCache, size } = await renderGribToLocalFile(key, warmReseau, echeance, warmDate, log);
         log.info({ key, reseau: warmReseau, echeance, fromCache, size }, "synergie warm: ok");
       } catch (err) {
         log.warn({ key, reseau: warmReseau, echeance, err }, "synergie warm: échoué");
