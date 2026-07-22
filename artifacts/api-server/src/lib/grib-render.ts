@@ -301,19 +301,23 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
 
   // Lignes de courant (style Synergie "Flux 850") — remplacent les barbules
   // pour ce champ : des filets bleus continus qui suivent le vent sur toute
-  // la carte, par-dessus l'aplat couleur conserve. Semees sur toute l'emprise
-  // extraite (pas seulement l'emprise affichee) pour que le zoom eventuel
-  // (viewBounds) ne laisse pas de lignes tronquees pile au bord.
+  // la carte, par-dessus l'aplat couleur conserve. Semees sur l'emprise
+  // AFFICHEE (viewLonSpan/viewLatSpan), pas l'emprise complete de la grille
+  // extraite — sinon, en cas de zoom (Mali), la plupart des semis tombent
+  // hors cadre et il ne reste qu'une poignee de lignes eparses (meme bug que
+  // pour les barbules de vent, corrige de la meme facon ici).
   const streamlineMarkers: string[] = [];
   if (opts.streamlines) {
     const { u, v } = opts.streamlines;
-    const seedSpacingDeg = Math.max(lonSpan, latSpan) / 28;
-    const paths = traceStreamlines(u, v, ni, nj, lon0, lon1, lat0, lat1, seedSpacingDeg);
+    const seedSpacingDeg = Math.max(viewLonSpan, viewLatSpan) / 40;
+    const paths = traceStreamlines(u, v, ni, nj, lon0, lon1, lat0, lat1, seedSpacingDeg, {
+      lon0: viewLon0, lon1: viewLon1, lat0: viewLat0, lat1: viewLat1,
+    });
     const ARROW_EVERY = 12; // segments entre deux fleches sur une meme ligne
     for (const path of paths) {
       const px = path.points.map(([lon, lat]) => [xFor(lon), yFor(lat)] as [number, number]);
       const d = px.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-      streamlineMarkers.push(`<path d="${d}" fill="none" stroke="#1d3f9e" stroke-width="1.1" stroke-linejoin="round" stroke-linecap="round" clip-path="url(#plotClip)"/>`);
+      streamlineMarkers.push(`<path d="${d}" fill="none" stroke="#1d3f9e" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round" clip-path="url(#plotClip)"/>`);
 
       for (let i = ARROW_EVERY; i < px.length - 1; i += ARROW_EVERY) {
         const [ax, ay] = px[i]!;
