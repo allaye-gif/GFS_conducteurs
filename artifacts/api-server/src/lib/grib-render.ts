@@ -3,6 +3,7 @@ import { COASTLINE_WEST_AFRICA } from "./grib-coastline.js";
 import { BORDERS_WEST_AFRICA } from "./grib-borders.js";
 import { traceContours, smoothField, findExtrema, type ContourPath } from "./grib-contour.js";
 import { findRidgesAndTroughs } from "./grib-ridge.js";
+import { traceStreamlines } from "./grib-streamlines.js";
 
 // Reperes visuels : quelques capitales/grandes villes d'Afrique de l'Ouest pour
 // s'orienter sur la carte sans avoir a deviner a partir du seul quadrillage.
@@ -108,6 +109,7 @@ export interface RenderOptions {
   contours?: ContourOptions;
   overlayTime?: string; // ex: "0600" — affiche en overlay sous le titre pour les cartes a isolignes
   windBarbs?: { u: number[]; v: number[] }; // memes dimensions/emprise que la grille principale
+  streamlines?: { u: number[]; v: number[] }; // lignes de courant (style Synergie "Flux 850") superposees a l'aplat, a la place des barbules pour ce champ
   bandBoundaries?: number[]; // active une legende/aplat a bandes discretes plutot qu'un degrade continu
   bandColors?: [number, number, number][]; // couleurs de bande choisies a la main (boundaries.length + 1) — remplace la derivation automatique depuis `stops`, pour des categories nettement tranchees (ex: sec/modere/humide/sature) plutot qu'un degrade discretise
   viewBounds?: { lon0: number; lon1: number; lat0: number; lat1: number }; // zoome l'affichage sur une sous-region (ex: Mali) sans changer la grille de donnees extraite (qui garde sa vraie emprise complete, necessaire pour un contourage/positionnement corrects) — utile pour le vent, ou zoomer augmente la densite visible des barbules
@@ -293,6 +295,37 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
         const x = xFor(lon);
         const y = yFor(lat);
         windBarbMarkers.push(windBarbSvg(x, y, uVal, vVal, "#0f172a"));
+      }
+    }
+  }
+
+  // Lignes de courant (style Synergie "Flux 850") — remplacent les barbules
+  // pour ce champ : des filets bleus continus qui suivent le vent sur toute
+  // la carte, par-dessus l'aplat couleur conserve. Semees sur toute l'emprise
+  // extraite (pas seulement l'emprise affichee) pour que le zoom eventuel
+  // (viewBounds) ne laisse pas de lignes tronquees pile au bord.
+  const streamlineMarkers: string[] = [];
+  if (opts.streamlines) {
+    const { u, v } = opts.streamlines;
+    const seedSpacingDeg = Math.max(lonSpan, latSpan) / 28;
+    const paths = traceStreamlines(u, v, ni, nj, lon0, lon1, lat0, lat1, seedSpacingDeg);
+    const ARROW_EVERY = 12; // segments entre deux fleches sur une meme ligne
+    for (const path of paths) {
+      const px = path.points.map(([lon, lat]) => [xFor(lon), yFor(lat)] as [number, number]);
+      const d = px.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+      streamlineMarkers.push(`<path d="${d}" fill="none" stroke="#1d3f9e" stroke-width="1.1" stroke-linejoin="round" stroke-linecap="round" clip-path="url(#plotClip)"/>`);
+
+      for (let i = ARROW_EVERY; i < px.length - 1; i += ARROW_EVERY) {
+        const [ax, ay] = px[i]!;
+        const [bx, by] = px[i + 1]!;
+        const angle = Math.atan2(by - ay, bx - ax);
+        const len = 5.5;
+        const spread = 0.5; // radians
+        const x1 = ax - len * Math.cos(angle - spread);
+        const y1 = ay - len * Math.sin(angle - spread);
+        const x2 = ax - len * Math.cos(angle + spread);
+        const y2 = ay - len * Math.sin(angle + spread);
+        streamlineMarkers.push(`<polygon points="${ax.toFixed(1)},${ay.toFixed(1)} ${x1.toFixed(1)},${y1.toFixed(1)} ${x2.toFixed(1)},${y2.toFixed(1)}" fill="#1d3f9e" clip-path="url(#plotClip)"/>`);
       }
     }
   }
@@ -658,6 +691,7 @@ export function renderGribSvg(grid: GribGrid, opts: RenderOptions): string {
   <g>${extremaMarkers.join("")}</g>
   <g>${cityMarkers.join("")}</g>
   <g clip-path="url(#plotClip)">${windBarbMarkers.join("")}</g>
+  <g clip-path="url(#plotClip)">${streamlineMarkers.join("")}</g>
   <rect x="${MARGIN.left}" y="${MARGIN.top}" width="${PLOT_W}" height="${PLOT_H}" fill="none" stroke="#000000" stroke-width="1"/>
   ${header}
   ${contourLegend}

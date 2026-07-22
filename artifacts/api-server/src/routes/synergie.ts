@@ -581,6 +581,7 @@ async function renderGribToLocalFile(
   let grid: GribGrid;
   let scaleKey: keyof typeof SCALES;
   let windBarbs: { u: number[]; v: number[] } | undefined;
+  let streamlines: { u: number[]; v: number[] } | undefined;
 
   if (cfg.kind === "wind") {
     const [uGrid, vGrid] = await Promise.all([
@@ -590,10 +591,15 @@ async function renderGribToLocalFile(
     const values = uGrid.values.map((u, i) => Math.sqrt(u * u + (vGrid.values[i] ?? 0) ** 2));
     grid = { ...uGrid, values };
     scaleKey = cfg.scale;
-    // Direction + force du vent, en plus de l'aplat couleur (magnitude seule) —
-    // demande explicite : garder le gradient existant, juste ajouter les
-    // barbules par-dessus.
-    windBarbs = { u: uGrid.values, v: vGrid.values };
+    // Flux 850 (FF850) suit maintenant le style Synergie "lignes de courant"
+    // (capture de reference fournie par l'utilisateur) au lieu des barbules —
+    // uniquement ce champ, le vent 10m (FF10) garde ses barbules deja
+    // validees. L'aplat couleur (magnitude) reste dans les deux cas.
+    if (key === "FF850") {
+      streamlines = { u: uGrid.values, v: vGrid.values };
+    } else {
+      windBarbs = { u: uGrid.values, v: vGrid.values };
+    }
   } else {
     grid = await extractGribGrid(cfg.param, cfg.niveau, echeance, synDate, cfg.combinaison);
     scaleKey = cfg.scale;
@@ -613,6 +619,7 @@ async function renderGribToLocalFile(
     bandColors: "bandColors" in scale ? (scale.bandColors as unknown as [number, number, number][]) : undefined,
     overlayTime: validTimeLabel,
     windBarbs,
+    streamlines,
     viewBounds: cfg.kind === "wind" ? MALI_BBOX : undefined,
   });
 
