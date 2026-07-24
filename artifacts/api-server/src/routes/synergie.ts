@@ -8,7 +8,7 @@ import {
   getCachedFile, localCachePath, resolveArchivePath,
   openSFTP, runSSHCommand, readRemoteFile, resolveSynergieReseau,
 } from "../lib/synergie-sftp.js";
-import { extractGribGrid, type GribGrid } from "../lib/grib-extract.js";
+import { extractGribGrid, sampleGridAt, type GribGrid } from "../lib/grib-extract.js";
 import { renderGribSvg, SCALES, type ColorStop } from "../lib/grib-render.js";
 import { computeAbsoluteVorticityX1e7 } from "../lib/grib-vorticity.js";
 import { renderVorticityComboSvg, type VorticityLayer } from "../lib/grib-vorticity-render.js";
@@ -651,6 +651,83 @@ async function handleRenderGrib(
     if (!res.headersSent) res.status(503).json({ error: String(err) });
   }
 }
+
+// GET /api/synergie/point?lat=12.65&lon=-8.00&date=2026-07-24 — valeur ponctuelle
+// (pas une carte) pour une coordonnee donnee : alimente le generateur de
+// bulletins mfy_Mali en donnees GFSAFR025, en plus/alternative a Open-Meteo.
+// Tmax/Tmin approximes par convention (06h = creux nocturne, 15h = pic
+// diurne) — GFS ne fournit que des instantanes, pas un vrai min/max
+// journalier. Nebulosite non exploitee (champ NEBUL_T jamais verifie a ce
+// jour) : cloudPct utilise une valeur neutre fixe, seule la pluie pilote
+// vraiment le choix d'icone.
+const DIRS8 = ["N", "NE", "E", "SE", "S", "SO", "O", "NO"];
+function compassFromUV(u: number, v: number): string {
+  const bearingTo = ((Math.atan2(u, v) * 180) / Math.PI + 360) % 360;
+  const bearingFrom = (bearingTo + 180) % 360; // direction d'ou vient le vent, convention meteo standard
+  return DIRS8[Math.round(bearingFrom / 45) % 8]!;
+}
+
+router.get("/synergie/point", async (req, res) => {
+  const lat = parseFloat(String(req.query["lat"] ?? ""));
+  const lon = parseFloat(String(req.query["lon"] ?? ""));
+  const dateStr = String(req.query["date"] ?? "");
+  if (Number.isNaN(lat) || Number.isNaN(lon) || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    res.status(400).json({ error: "Paramètres requis : lat, lon, date (YYYY-MM-DD)" });
+    return;
+  }
+
+  try {
+    const { reseau, synDate } = await resolveSynergieReseau();
+    const reseauHour = parseInt(reseau.replace("H", ""), 10) || 0;
+    const runDateStr = synDate.slice(0, 8);
+    const runDateUTC = Date.UTC(
+      parseInt(runDateStr.slice(0, 4), 10), parseInt(runDateStr.slice(4, 6), 10) - 1, parseInt(runDateStr.slice(6, 8), 10)
+    );
+    const targetDateUTC = Date.UTC(
+      parseInt(dateStr.slice(0, 4), 10), parseInt(dateStr.slice(5, 7), 10) - 1, parseInt(dateStr.slice(8, 10), 10)
+    );
+    const dayOffset = Math.round((targetDateUTC - runDateUTC) / 86_400_000);
+    const echeanceFor = (hour: number) => dayOffset * 24 + hour - reseauHour;
+    const ech06 = echeanceFor(6), ech12 = echeanceFor(12), ech15 = echeanceFor(15), ech18 = echeanceFor(18);
+
+    if (ech06 < 3) {
+      res.status(422).json({ error: `Date trop ancienne pour le cycle disponible (réseau ${reseau} du ${runDateStr})` });
+      return;
+    }
+
+    const [t06Grid, t15Grid, uGrid, vGrid, precipGrid] = await Promise.all([
+      extractGribGrid("T", "2M", `${ech06}H`, synDate, "H"),
+      extractGribGrid("T", "2M", `${ech15}H`, synDate, "H"),
+      extractGribGrid("U", "10M", `${ech12}H`, synDate, "H"),
+      extractGribGrid("V", "10M", `${ech12}H`, synDate, "H"),
+      extractGribGrid("PRECIP", "SOL", `${ech18}H`, synDate, "P"),
+    ]);
+
+    const t06 = sampleGridAt(t06Grid, lat, lon);
+    const t15 = sampleGridAt(t15Grid, lat, lon);
+    const u = sampleGridAt(uGrid, lat, lon);
+    const v = sampleGridAt(vGrid, lat, lon);
+    const precip = sampleGridAt(precipGrid, lat, lon) ?? 0;
+
+    if (t06 === undefined || t15 === undefined || u === undefined || v === undefined) {
+      res.status(422).json({ error: "Coordonnée hors de l'emprise de la grille GFSAFR025" });
+      return;
+    }
+
+    const speedMs = Math.hypot(u, v);
+    res.json({
+      tmin: Math.round(t06 - 273.15),
+      tmax: Math.round(t15 - 273.15),
+      precipMm: Math.round(precip * 10) / 10,
+      dir: compassFromUV(u, v),
+      speedKmh: Math.round(speedMs * 3.6),
+      reseau, synDate,
+    });
+  } catch (err) {
+    req.log.warn({ err }, "synergie/point: error");
+    res.status(503).json({ error: String(err) });
+  }
+});
 
 // GET /api/synergie/render-grib?key=PMER&reseau=12H&echeance=6H  (testable depuis le navigateur)
 // Note echeance : le catalogue GRIB reel n'a jamais "0H" (echeance minimale "3H")

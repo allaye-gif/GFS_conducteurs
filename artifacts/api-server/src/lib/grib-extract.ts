@@ -1,4 +1,5 @@
 import { runSSHCommand } from "./synergie-sftp.js";
+import { bilinear } from "./grib-streamlines.js";
 
 export interface GribGrid {
   ni: number;
@@ -8,6 +9,18 @@ export interface GribGrid {
   lat1: number;
   lon1: number;
   values: number[]; // row-major: row 0 = lat0 (sud), col 0 = lon0 (ouest)
+}
+
+// Echantillonne la grille a une coordonnee (lat,lon) precise par interpolation
+// bilineaire — utilise pour extraire une valeur ponctuelle (ex: pour une
+// ville) plutot qu'une carte complete.
+export function sampleGridAt(grid: GribGrid, lat: number, lon: number): number | undefined {
+  const { ni, nj, lat0, lon0, lat1, lon1, values } = grid;
+  const lonSpan = lon1 - lon0 || 1;
+  const latSpan = lat1 - lat0 || 1;
+  const col = ((lon - lon0) / lonSpan) * (ni - 1);
+  const row = ((lat - lat0) / latSpan) * (nj - 1);
+  return bilinear(values, ni, nj, col, row);
 }
 
 // Preambule fiable : sourcer le profil Synergie puis forcer la lecture directe
@@ -65,6 +78,14 @@ function whereClauseFor(param: string, niveau: string): string | null {
   return null;
 }
 
+// Cache memoire des grilles brutes deja extraites (7h, meme duree que le
+// cache disque des rendus) — plusieurs appelants demandent souvent EXACTEMENT
+// la meme grille (ex: /synergie/point interroge le meme champ pour 20 villes
+// d'affilee, seul le point echantillonne differe) ; sans ce cache chaque
+// ville relancerait une extraction SSH complete pour rien.
+const GRID_CACHE_TTL = 7 * 60 * 60 * 1000;
+const gridCache = new Map<string, { grid: GribGrid; expiresAt: number }>();
+
 /**
  * Extrait un champ GRIB (param/niveau/echeance) via extr_grib_modele.sh puis le
  * decode en grille lat/lon/valeur via grib_get_data — contourne entierement
@@ -72,6 +93,19 @@ function whereClauseFor(param: string, niveau: string): string | null {
  * (voir routes/synergie.ts).
  */
 export function extractGribGrid(
+  param: string, niveau: string, echeance: string, synDate: string, coordv: string
+): Promise<GribGrid> {
+  const cacheKey = `${param}_${niveau}_${echeance}_${synDate}_${coordv}`;
+  const cached = gridCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt) return Promise.resolve(cached.grid);
+
+  return extractGribGridUncached(param, niveau, echeance, synDate, coordv).then((grid) => {
+    gridCache.set(cacheKey, { grid, expiresAt: Date.now() + GRID_CACHE_TTL });
+    return grid;
+  });
+}
+
+function extractGribGridUncached(
   param: string, niveau: string, echeance: string, synDate: string, coordv: string
 ): Promise<GribGrid> {
   return withExtractLock(() => doExtractGribGrid(param, niveau, echeance, synDate, coordv));

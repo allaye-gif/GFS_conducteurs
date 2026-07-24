@@ -11,7 +11,7 @@ export interface StreamlinePath {
   points: [number, number][]; // [lon, lat][], dans l'ordre du trace (suit le vent)
 }
 
-function bilinear(
+export function bilinear(
   values: number[], ni: number, nj: number, col: number, row: number
 ): number | undefined {
   if (col < 0 || row < 0 || col > ni - 1 || row > nj - 1) return undefined;
