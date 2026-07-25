@@ -9,6 +9,7 @@ import {
   openSFTP, runSSHCommand, readRemoteFile, resolveSynergieReseau,
 } from "../lib/synergie-sftp.js";
 import { extractGribGrid, sampleGridAt, type GribGrid } from "../lib/grib-extract.js";
+import { extractResilient, extractResilientPair } from "../lib/grib-resilient.js";
 import { renderGribSvg, SCALES, type ColorStop } from "../lib/grib-render.js";
 import { computeAbsoluteVorticityX1e7 } from "../lib/grib-vorticity.js";
 import { renderVorticityComboSvg, type VorticityLayer } from "../lib/grib-vorticity-render.js";
@@ -676,38 +677,29 @@ router.get("/synergie/point", async (req, res) => {
     return;
   }
 
+  const targetDate = new Date(Date.UTC(
+    parseInt(dateStr.slice(0, 4), 10), parseInt(dateStr.slice(5, 7), 10) - 1, parseInt(dateStr.slice(8, 10), 10)
+  ));
+
   try {
-    const { reseau, synDate } = await resolveSynergieReseau();
-    const reseauHour = parseInt(reseau.replace("H", ""), 10) || 0;
-    const runDateStr = synDate.slice(0, 8);
-    const runDateUTC = Date.UTC(
-      parseInt(runDateStr.slice(0, 4), 10), parseInt(runDateStr.slice(4, 6), 10) - 1, parseInt(runDateStr.slice(6, 8), 10)
-    );
-    const targetDateUTC = Date.UTC(
-      parseInt(dateStr.slice(0, 4), 10), parseInt(dateStr.slice(5, 7), 10) - 1, parseInt(dateStr.slice(8, 10), 10)
-    );
-    const dayOffset = Math.round((targetDateUTC - runDateUTC) / 86_400_000);
-    const echeanceFor = (hour: number) => dayOffset * 24 + hour - reseauHour;
-    const ech06 = echeanceFor(6), ech12 = echeanceFor(12), ech15 = echeanceFor(15), ech18 = echeanceFor(18);
-
-    if (ech06 < 3) {
-      res.status(422).json({ error: `Date trop ancienne pour le cycle disponible (réseau ${reseau} du ${runDateStr})` });
-      return;
-    }
-
-    const [t06Grid, t15Grid, uGrid, vGrid, precipGrid] = await Promise.all([
-      extractGribGrid("T", "2M", `${ech06}H`, synDate, "H"),
-      extractGribGrid("T", "2M", `${ech15}H`, synDate, "H"),
-      extractGribGrid("U", "10M", `${ech12}H`, synDate, "H"),
-      extractGribGrid("V", "10M", `${ech12}H`, synDate, "H"),
-      extractGribGrid("PRECIP", "SOL", `${ech18}H`, synDate, "P"),
+    // Chaque champ tente son propre repli de cycle en cas de fichier vide
+    // (SYABAN02 ecrit l'archive progressivement, pas d'un coup — voir
+    // grib-resilient.ts) : deux champs peuvent finir sur des cycles
+    // differents pour une meme requete, c'est voulu — l'objectif est de ne
+    // jamais renvoyer "aucune donnee" tant qu'un cycle plus ancien est deja
+    // complet. U/V restent toujours du meme cycle (couple coherent).
+    const [t06Res, t15Res, windRes, precipRes] = await Promise.all([
+      extractResilient("T", "2M", "H", targetDate, 6),
+      extractResilient("T", "2M", "H", targetDate, 15),
+      extractResilientPair("U", "V", "10M", "H", targetDate, 12),
+      extractResilient("PRECIP", "SOL", "P", targetDate, 18),
     ]);
 
-    const t06 = sampleGridAt(t06Grid, lat, lon);
-    const t15 = sampleGridAt(t15Grid, lat, lon);
-    const u = sampleGridAt(uGrid, lat, lon);
-    const v = sampleGridAt(vGrid, lat, lon);
-    const precip = sampleGridAt(precipGrid, lat, lon) ?? 0;
+    const t06 = sampleGridAt(t06Res.grid, lat, lon);
+    const t15 = sampleGridAt(t15Res.grid, lat, lon);
+    const u = sampleGridAt(windRes.gridA, lat, lon);
+    const v = sampleGridAt(windRes.gridB, lat, lon);
+    const precip = sampleGridAt(precipRes.grid, lat, lon) ?? 0;
 
     if (t06 === undefined || t15 === undefined || u === undefined || v === undefined) {
       res.status(422).json({ error: "Coordonnée hors de l'emprise de la grille GFSAFR025" });
@@ -721,7 +713,13 @@ router.get("/synergie/point", async (req, res) => {
       precipMm: Math.round(precip * 10) / 10,
       dir: compassFromUV(u, v),
       speedKmh: Math.round(speedMs * 3.6),
-      reseau, synDate,
+      // Tracabilite : quel cycle a effectivement servi pour chaque champ (peuvent differer).
+      sources: {
+        tmin: { reseau: t06Res.reseau, synDate: t06Res.synDate, echeance: t06Res.echeance },
+        tmax: { reseau: t15Res.reseau, synDate: t15Res.synDate, echeance: t15Res.echeance },
+        vent: { reseau: windRes.reseau, synDate: windRes.synDate, echeance: windRes.echeance },
+        precip: { reseau: precipRes.reseau, synDate: precipRes.synDate, echeance: precipRes.echeance },
+      },
     });
   } catch (err) {
     req.log.warn({ err }, "synergie/point: error");
