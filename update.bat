@@ -12,7 +12,17 @@ git checkout -- package-lock.json >nul 2>&1
 echo.
 
 echo  Recuperation des mises a jour GitHub...
-git pull origin main
+:: HP developpe sur "master", svrprevi tourne sur "main" (historique git
+:: separe a l'origine) - sur main on fusionne master automatiquement pour ne
+:: jamais avoir a le faire a la main.
+git fetch origin
+for /f %%b in ('git rev-parse --abbrev-ref HEAD') do set CURRENT_BRANCH=%%b
+if /i "%CURRENT_BRANCH%"=="main" (
+    git merge origin/master -m "merge master into main"
+    git push origin main
+) else (
+    git merge "origin/%CURRENT_BRANCH%"
+)
 echo.
 
 echo  Installation des dependances...

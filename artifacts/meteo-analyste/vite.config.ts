@@ -76,5 +76,15 @@ export default defineConfig({
     port,
     host: "0.0.0.0",
     allowedHosts: true,
+    ...(process.env.REPL_ID === undefined
+      ? {
+          proxy: {
+            "/api": {
+              target: `http://127.0.0.1:${apiPort}`,
+              changeOrigin: true,
+            },
+          },
+        }
+      : {}),
   },
 });

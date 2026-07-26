@@ -66,7 +66,19 @@ Write-Host "[1/5] Recuperation des mises a jour..." -ForegroundColor Yellow
 # en PowerShell 5.1 ca transforme n'importe quel message stderr d'une commande
 # native en erreur terminante des que $ErrorActionPreference = "Stop", meme si
 # la commande a reussi.
-try { git pull | Out-Null } catch { Write-Host "      (pas de mise a jour recuperee, on continue)" -ForegroundColor Gray }
+# HP developpe sur "master", svrprevi tourne sur "main" (historique git
+# separe a l'origine) - sur main on fusionne master automatiquement pour ne
+# jamais avoir a le faire a la main.
+try {
+    git fetch origin | Out-Null
+    $currentBranch = (git rev-parse --abbrev-ref HEAD).Trim()
+    if ($currentBranch -eq "main") {
+        git merge origin/master -m "merge master into main" | Out-Null
+        git push origin main | Out-Null
+    } else {
+        git merge "origin/$currentBranch" | Out-Null
+    }
+} catch { Write-Host "      (pas de mise a jour recuperee, on continue)" -ForegroundColor Gray }
 Write-Host "      OK" -ForegroundColor Green
 
 Write-Host ""
@@ -82,12 +94,18 @@ pnpm rebuild cpu-features ssh2 | Out-Null
 Write-Host "      OK" -ForegroundColor Green
 
 Write-Host ""
+Write-Host "[2b/5] Compilation (production - jamais 'dev', qui tourne sur des ports separes pour les developpeurs)..." -ForegroundColor Yellow
+pnpm --filter @workspace/api-server run build | Out-Null
+pnpm --filter @workspace/meteo-analyste run build | Out-Null
+Write-Host "      OK" -ForegroundColor Green
+
+Write-Host ""
 Write-Host "[3/5] Demarrage du serveur API (port $apiPort)..." -ForegroundColor Yellow
-Start-Process cmd -ArgumentList "/k title API Server && pnpm --filter @workspace/api-server run dev" -WorkingDirectory $PSScriptRoot
+Start-Process cmd -ArgumentList "/k title API Server && pnpm --filter @workspace/api-server run start" -WorkingDirectory $PSScriptRoot
 Start-Sleep -Seconds 5
 
 Write-Host "[4/5] Demarrage du frontend (port $frontendPort)..." -ForegroundColor Yellow
-Start-Process cmd -ArgumentList "/k title Frontend Meteo && pnpm --filter @workspace/meteo-analyste run dev" -WorkingDirectory $PSScriptRoot
+Start-Process cmd -ArgumentList "/k title Frontend Meteo && pnpm --filter @workspace/meteo-analyste run serve" -WorkingDirectory $PSScriptRoot
 Start-Sleep -Seconds 4
 
 # ── Tunnel Cloudflare ──────────────────────────────────────────────────────────
