@@ -561,37 +561,53 @@ function validTimeLabel(reseau: string, echeance: string): string {
   return `${String(validHour).padStart(2, "0")}H`;
 }
 
-async function buildSynergieSection(): Promise<BriefingSection> {
+// Une section par champ (au lieu d'une seule section "synergie" regroupant
+// tout) : necessaire pour intercaler chaque champ Synergie a cote de son
+// equivalent NOAA (meme ordre logique que la version imprimee/PPT), et
+// resout au passage le bug de pagination PowerPoint ou les 2 dernieres
+// images de T2M (6 au total, chunk de 4) se retrouvaient sur une diapo
+// partagee avec le champ suivant — addSectionSlides() traite maintenant
+// chaque champ separement, donc ce reliquat reste seul sur sa propre diapo.
+async function buildSynergieFieldSections(): Promise<Record<string, BriefingSection>> {
   const { reseau, synDate } = await resolveSynergieReseau();
-  const subsections = SYNERGIE_LIVE_PARAMS.map(({ key, label }) => {
-    if (key === "T2M") {
-      return {
-        label: `${label} — GFSAFR025 réseau ${T2M_RESEAU} (comparaison auj./demain)`,
-        charts: T2M_SLOTS.map(({ echeance, label: slotLabel }) => ({
-          id: `synergie-${key}-${echeance}`,
-          label: `${label} — ${slotLabel}`,
-          url: synergieGribUrl(key, T2M_RESEAU, echeance),
-          description: `${label} — modèle GFSAFR025 (SYABAN02) — réseau ${T2M_RESEAU} — échéance +${echeance} (valide ${validTimeLabel(T2M_RESEAU, echeance)})`,
-        })),
-      };
-    }
-    return {
-      label: `${label} — GFSAFR025 réseau ${reseau}`,
-      charts: SYNERGIE_ECHEANCES.map((ech) => ({
-        id: `synergie-${key}-${ech}`,
-        label: `${label} — ${validTimeLabel(reseau, ech)}`,
-        url: synergieGribUrl(key, reseau, ech, synDate),
-        description: `${label} — modèle GFSAFR025 (SYABAN02) — réseau ${reseau} — échéance +${ech} (valide ${validTimeLabel(reseau, ech)})`,
-      })),
-    };
-  });
+  const sections: Record<string, BriefingSection> = {};
 
-  return {
-    id: "synergie",
-    name: "Champs Synergie — SYABAN02 (GFS live)",
-    contentType: "images",
-    subsections,
-  };
+  for (const { key, label } of SYNERGIE_LIVE_PARAMS) {
+    const id = `synergie-${key.toLowerCase()}`;
+    if (key === "T2M") {
+      sections[key] = {
+        id,
+        name: `${label} — Synergie (GFSAFR025)`,
+        contentType: "images",
+        subsections: [{
+          label: `${label} — GFSAFR025 réseau ${T2M_RESEAU} (comparaison auj./demain)`,
+          charts: T2M_SLOTS.map(({ echeance, label: slotLabel }) => ({
+            id: `synergie-${key}-${echeance}`,
+            label: `${label} — ${slotLabel}`,
+            url: synergieGribUrl(key, T2M_RESEAU, echeance),
+            description: `${label} — modèle GFSAFR025 (SYABAN02) — réseau ${T2M_RESEAU} — échéance +${echeance} (valide ${validTimeLabel(T2M_RESEAU, echeance)})`,
+          })),
+        }],
+      };
+      continue;
+    }
+    sections[key] = {
+      id,
+      name: `${label} — Synergie (GFSAFR025)`,
+      contentType: "images",
+      subsections: [{
+        label: `${label} — GFSAFR025 réseau ${reseau}`,
+        charts: SYNERGIE_ECHEANCES.map((ech) => ({
+          id: `synergie-${key}-${ech}`,
+          label: `${label} — ${validTimeLabel(reseau, ech)}`,
+          url: synergieGribUrl(key, reseau, ech, synDate),
+          description: `${label} — modèle GFSAFR025 (SYABAN02) — réseau ${reseau} — échéance +${ech} (valide ${validTimeLabel(reseau, ech)})`,
+        })),
+      }],
+    };
+  }
+
+  return sections;
 }
 
 // ─── Main catalog builder ──────────────────────────────────────────────────────
@@ -612,7 +628,7 @@ export async function getBriefingCatalog(): Promise<BriefingCatalogResult> {
     buildMisvaLowLevSection(),
   ]);
 
-  const synergieSection = await buildSynergieSection();
+  const synergieFields = await buildSynergieFieldSections();
 
   const ecmwfSection = ecmwfBaseTime
     ? await buildEcmwfSection(ecmwfBaseTime)
@@ -653,13 +669,11 @@ export async function getBriefingCatalog(): Promise<BriefingCatalogResult> {
       ],
     },
 
-    // ── 3. Champs Synergie — SYABAN02 ────────────────────────────────────────
-    synergieSection,
-
-    // ── 4. ANASYG (MISVA/CISMF) ───────────────────────────────────────────────
+    // ── 3. ANASYG (MISVA/CISMF) ────────────────────────────────────────────────
     anasygSection,
 
-    // ── 4. Champs de Pression — GFS ───────────────────────────────────────────
+    // ── 4. Champs de Pression — Synergie puis GFS ─────────────────────────────
+    synergieFields.PMER,
     {
       id: "pmer-pluie",
       name: "Champs de Pression — GFS (MSLP + Pluie 6h)",
@@ -672,33 +686,15 @@ export async function getBriefingCatalog(): Promise<BriefingCatalogResult> {
       ],
     },
 
-    // ── 5. Humidité et Vents — 850 hPa ────────────────────────────────────────
+    // ── 5. Vents — 10m puis flux 850 hPa (Synergie puis GFS), puis 700 hPa (GFS) ──
+    synergieFields.FF10,
+    synergieFields.FF850,
+    // Vent 850 hPa GFS retiré : redondant avec le flux 850 Synergie, peu utile.
     {
-      id: "rh-850",
-      name: "Humidité et Vents — 850 hPa (GFS)",
+      id: "vent-700",
+      name: "Vents 700 hPa (GFS)",
       contentType: "images",
       subsections: [
-        {
-          label: "Humidité Relative 850 hPa (GFS)",
-          charts: cpcCharts(cycle, "850mb_rh", "HR 850 hPa", "rh850", "Humidité relative à 850 hPa — couche de mousson"),
-        },
-        {
-          label: "Vents 850 hPa — Jet d'Est Africain (GFS)",
-          charts: cpcCharts(cycle, "850mb_wind", "Vent 850 hPa", "wind850", "African Easterly Jet"),
-        },
-      ],
-    },
-
-    // ── 6. Humidité et Vents — 700 hPa ────────────────────────────────────────
-    {
-      id: "rh-700",
-      name: "Humidité et Vents — 700 hPa (GFS)",
-      contentType: "images",
-      subsections: [
-        {
-          label: "Humidité Relative 700 hPa (GFS)",
-          charts: cpcCharts(cycle, "700mb_rh", "HR 700 hPa", "rh700", "Humidité relative à 700 hPa — moyenne troposphère"),
-        },
         {
           label: "Vents 700 hPa (GFS)",
           charts: cpcCharts(cycle, "700mb_wind", "Vent 700 hPa", "wind700", "Flux à 700 hPa — ondes d'est africaines"),
@@ -706,7 +702,34 @@ export async function getBriefingCatalog(): Promise<BriefingCatalogResult> {
       ],
     },
 
-    // ── 7. Températures 2m — GFS ──────────────────────────────────────────────
+    // ── 6. Humidité — 850 hPa puis 700 hPa (Synergie puis GFS) ────────────────
+    synergieFields.HU850,
+    {
+      id: "rh-850",
+      name: "Humidité — 850 hPa (GFS)",
+      contentType: "images",
+      subsections: [
+        {
+          label: "Humidité Relative 850 hPa (GFS)",
+          charts: cpcCharts(cycle, "850mb_rh", "HR 850 hPa", "rh850", "Humidité relative à 850 hPa — couche de mousson"),
+        },
+      ],
+    },
+    synergieFields.HU700,
+    {
+      id: "rh-700",
+      name: "Humidité — 700 hPa (GFS)",
+      contentType: "images",
+      subsections: [
+        {
+          label: "Humidité Relative 700 hPa (GFS)",
+          charts: cpcCharts(cycle, "700mb_rh", "HR 700 hPa", "rh700", "Humidité relative à 700 hPa — moyenne troposphère"),
+        },
+      ],
+    },
+
+    // ── 7. Températures 2m — Synergie puis GFS ────────────────────────────────
+    synergieFields.T2M,
     {
       id: "tmax-gfs",
       name: "Températures 2m — GFS (CPC NCEP)",
@@ -729,16 +752,19 @@ export async function getBriefingCatalog(): Promise<BriefingCatalogResult> {
       ],
     },
 
-    // ── 8. Eau Précipitable PW (MISVA ECMWF) ──────────────────────────────────
+    // ── 8. Tourbillon Absolu — Synergie ────────────────────────────────────────
+    synergieFields.TOURCOMBO,
+
+    // ── 9. Eau Précipitable PW (MISVA ECMWF) ──────────────────────────────────
     pwSection,
 
-    // ── 9. Séries Temporelles PW Mali (MISVA) ─────────────────────────────────
+    // ── 10. Séries Temporelles PW Mali (MISVA) ────────────────────────────────
     timeSeriesSection,
 
-    // ── 10. Épaisseur de la Mousson (MISVA LowLev) ────────────────────────────
+    // ── 11. Épaisseur de la Mousson (MISVA LowLev) ────────────────────────────
     lowLevSection,
 
-    // ── 11. CAPE — Énergie Convective ─────────────────────────────────────────
+    // ── 12. CAPE — Énergie Convective ─────────────────────────────────────────
     {
       id: "cape",
       name: "CAPE — Énergie Convective (GFS)",
@@ -751,10 +777,11 @@ export async function getBriefingCatalog(): Promise<BriefingCatalogResult> {
       ],
     },
 
-    // ── 12. Champs de Pluie — ECMWF ───────────────────────────────────────────
+    // ── 13. Champs de Pluie — Synergie puis ECMWF ─────────────────────────────
+    synergieFields.RR6H,
     ecmwfSection,
 
-    // ── 13. Champs de Pluie — UK Met Office (captures manuelles) ─────────────
+    // ── 14. Champs de Pluie — UK Met Office (captures manuelles) ─────────────
     {
       id: "pluie-ukmet",
       name: "Champs de Pluie — UK Met Office (captures)",
@@ -772,7 +799,7 @@ export async function getBriefingCatalog(): Promise<BriefingCatalogResult> {
       ],
     },
 
-    // ── 14. Champs de Pluie — FFGS (Risque Crue Éclair) ──────────────────────
+    // ── 15. Champs de Pluie — FFGS (Risque Crue Éclair) ──────────────────────
     {
       id: "ffgs-captures",
       name: "Champs de Pluie — FFGS (Risque Crue Éclair)",
@@ -788,7 +815,7 @@ export async function getBriefingCatalog(): Promise<BriefingCatalogResult> {
       ],
     },
 
-    // ── 15. Pluie — Windy (live avec sélecteur de modèle) ────────────────────
+    // ── 16. Pluie — Windy (live avec sélecteur de modèle) ────────────────────
     {
       id: "pluie-windy",
       name: "Pluie — Windy (ICON / GFS / ECMWF)",
@@ -802,7 +829,7 @@ export async function getBriefingCatalog(): Promise<BriefingCatalogResult> {
       ],
     },
 
-    // ── 16. Captures Pluie — Windy (upload manuel) ────────────────────────────
+    // ── 17. Captures Pluie — Windy (upload manuel) ────────────────────────────
     {
       id: "windy-captures",
       name: "Captures Pluie — Windy (manuel)",
