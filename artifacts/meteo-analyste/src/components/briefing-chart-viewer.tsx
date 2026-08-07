@@ -1308,11 +1308,22 @@ export function BriefingChartViewer({
   );
 
   const order: string[] = React.useMemo(() => {
-    const stored = sectionNotes["__order__"];
-    if (stored) return stored.split(",").filter(Boolean);
     const predefinedIds = sections.map((s) => s.id);
     const customIds = Array.from({ length: customCount }, (_, n) => `custom:${n}`);
-    return [...predefinedIds, ...customIds];
+    const currentIds = [...predefinedIds, ...customIds];
+    const stored = sectionNotes["__order__"];
+    if (!stored) return currentIds;
+
+    // Drop stale IDs no longer in the catalog (e.g. a since-removed/renamed
+    // section), then append any current ID missing from the stored order —
+    // otherwise a catalog change (like splitting one section into several)
+    // leaves the new IDs permanently invisible, since they were never part
+    // of an order saved before they existed.
+    const currentIdSet = new Set(currentIds);
+    const kept = stored.split(",").filter((id) => currentIdSet.has(id));
+    const keptSet = new Set(kept);
+    const missing = currentIds.filter((id) => !keptSet.has(id));
+    return [...kept, ...missing];
   }, [sectionNotes, sections, customCount]);
 
   // ── Insert at any position ──────────────────────────────────
