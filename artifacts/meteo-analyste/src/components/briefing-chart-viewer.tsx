@@ -1315,15 +1315,36 @@ export function BriefingChartViewer({
     if (!stored) return currentIds;
 
     // Drop stale IDs no longer in the catalog (e.g. a since-removed/renamed
-    // section), then append any current ID missing from the stored order —
-    // otherwise a catalog change (like splitting one section into several)
-    // leaves the new IDs permanently invisible, since they were never part
-    // of an order saved before they existed.
+    // section). Any predefined ID missing from the stored order — e.g. a
+    // catalog change like splitting one section into several, whose new IDs
+    // were never part of an order saved before they existed — is reinserted
+    // next to its nearest surviving catalog neighbour, so it reappears where
+    // the catalog places it instead of getting silently dropped or dumped at
+    // the very end where nobody would notice it.
     const currentIdSet = new Set(currentIds);
     const kept = stored.split(",").filter((id) => currentIdSet.has(id));
     const keptSet = new Set(kept);
-    const missing = currentIds.filter((id) => !keptSet.has(id));
-    return [...kept, ...missing];
+    const result = [...kept];
+    for (const id of predefinedIds) {
+      if (keptSet.has(id)) continue;
+      const catIdx = predefinedIds.indexOf(id);
+      let insertPos = -1;
+      for (let i = catIdx - 1; i >= 0; i--) {
+        const p = result.indexOf(predefinedIds[i]);
+        if (p !== -1) { insertPos = p + 1; break; }
+      }
+      if (insertPos === -1) {
+        for (let i = catIdx + 1; i < predefinedIds.length; i++) {
+          const p = result.indexOf(predefinedIds[i]);
+          if (p !== -1) { insertPos = p; break; }
+        }
+      }
+      result.splice(insertPos === -1 ? result.length : insertPos, 0, id);
+    }
+    for (const id of customIds) {
+      if (!keptSet.has(id)) result.push(id);
+    }
+    return result;
   }, [sectionNotes, sections, customCount]);
 
   // ── Insert at any position ──────────────────────────────────
