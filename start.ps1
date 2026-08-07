@@ -79,7 +79,20 @@ try {
         git merge "origin/$currentBranch" | Out-Null
     }
 } catch { Write-Host "      (pas de mise a jour recuperee, on continue)" -ForegroundColor Gray }
-Write-Host "      OK" -ForegroundColor Green
+
+# Un merge en conflit laisse le depot dans un etat mi-fusionne : le catch
+# ci-dessus ne le detecte pas (git merge peut retourner un exit code sans
+# lever d'exception PowerShell). On verifie explicitement pour ne jamais
+# demarrer silencieusement sur du code a moitie fusionne.
+$unmerged = git diff --name-only --diff-filter=U 2>$null
+if ($unmerged) {
+    Write-Host "      CONFLIT DE FUSION sur : $($unmerged -join ', ')" -ForegroundColor Red
+    Write-Host "      Le demarrage continue sur le code d'AVANT le merge tente." -ForegroundColor Red
+    Write-Host "      Resous le conflit a la main (git status) puis relance." -ForegroundColor Red
+    git merge --abort 2>$null | Out-Null
+} else {
+    Write-Host "      OK" -ForegroundColor Green
+}
 
 Write-Host ""
 Write-Host "[2/5] Installation des dependances..." -ForegroundColor Yellow
