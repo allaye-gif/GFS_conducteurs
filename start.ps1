@@ -42,6 +42,38 @@ foreach ($p in @([int]$apiPort, [int]$frontendPort)) {
 }
 Start-Sleep -Seconds 1
 
+# Un process lance par la tache planifiee "MeteoAnalyste" tourne avec des
+# droits eleves : Stop-Process depuis une session normale echoue dessus sans
+# lever d'erreur PowerShell (SilentlyContinue ci-dessus l'avale), le port
+# reste donc occupe. Sans cette verification, le script continuait quand
+# meme, demarrait un nouveau serveur voue a planter en EADDRINUSE, et
+# affichait "Application demarree !" a la toute fin comme si de rien
+# n'etait — laissant tourner l'ancienne version sans que rien ne le signale.
+$stillBusy = @([int]$apiPort, [int]$frontendPort) | Where-Object {
+    Get-NetTCPConnection -LocalPort $_ -ErrorAction SilentlyContinue
+}
+if ($stillBusy) {
+    Write-Host ""
+    Write-Host "      Port(s) $($stillBusy -join ', ') toujours occupe(s) : le process en" -ForegroundColor Yellow
+    Write-Host "      cours a des droits superieurs a cette session (ex. tache planifiee" -ForegroundColor Yellow
+    Write-Host "      elevee) et ne peut pas etre arrete d'ici. Delegation a la tache" -ForegroundColor Yellow
+    Write-Host "      planifiee 'MeteoAnalyste', qui tourne elevee et gere elle-meme la" -ForegroundColor Yellow
+    Write-Host "      mise a jour complete (pull + build + redemarrage)..." -ForegroundColor Yellow
+    $task = Get-ScheduledTask -TaskName "MeteoAnalyste" -ErrorAction SilentlyContinue
+    if ($task) {
+        Start-ScheduledTask -TaskName "MeteoAnalyste"
+        Write-Host "      OK - tache declenchee en arriere-plan." -ForegroundColor Green
+        Write-Host "      Patientez ~1 minute puis rafraichissez le navigateur." -ForegroundColor Green
+    } else {
+        Write-Host "      ERREUR : tache planifiee 'MeteoAnalyste' introuvable sur ce poste." -ForegroundColor Red
+        Write-Host "      Relancez cette fenetre en tant qu'Administrateur pour liberer le" -ForegroundColor Red
+        Write-Host "      port manuellement." -ForegroundColor Red
+    }
+    Write-Host ""
+    Read-Host "Appuie sur Entree pour fermer cette fenetre"
+    exit 0
+}
+
 # --- Ouvrir les ports dans le pare-feu Windows ---
 Write-Host "[0/5] Ouverture des ports dans le pare-feu Windows..." -ForegroundColor Yellow
 foreach ($port in @($apiPort, $frontendPort)) {
